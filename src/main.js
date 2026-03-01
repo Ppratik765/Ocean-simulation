@@ -92,33 +92,39 @@ audioLoader.load('/ocean_sound.mp3', function(buffer) {
     }
 });
 
-// 5. WASD & Mouse Controls
+// 5. UNIFIED DESKTOP & MOBILE CONTROLS
 const controls = new PointerLockControls(camera, renderer.domElement);
 const blocker = document.getElementById('blocker');
 const instructions = document.getElementById('instructions');
 
+// State tracker to allow movement on mobile without PointerLock
+let isSimulating = false; 
+
 instructions.addEventListener('click', () => { 
+    // On desktop, this locks the mouse. On mobile, it often fails silently but that's fine.
     controls.lock(); 
-    userInteracted = true;
-    
-    // CRITICAL FIX: Forcefully wake up the browser's audio engine
+    isSimulating = true;
+    blocker.style.display = 'none';
+
     if (listener.context.state === 'suspended') {
         listener.context.resume();
     }
-    
-    // If the audio is already loaded and ready, play it
     if (audioLoaded && !oceanSound.isPlaying) {
         oceanSound.play();
     }
 });
 
-controls.addEventListener('lock', () => { blocker.style.display = 'none'; });
-controls.addEventListener('unlock', () => { blocker.style.display = 'flex'; });
+controls.addEventListener('unlock', () => { 
+    blocker.style.display = 'flex'; 
+    isSimulating = false; // Stop movement if unlocked
+});
 
+// Movement state
 const moveState = { forward: false, backward: false, left: false, right: false };
 const velocity = new THREE.Vector3();
 const direction = new THREE.Vector3();
 
+// --- DESKTOP KEYBOARD ---
 document.addEventListener('keydown', (event) => {
     switch (event.code) {
         case 'KeyW': moveState.forward = true; break;
@@ -136,16 +142,64 @@ document.addEventListener('keyup', (event) => {
     }
 });
 
+// --- MOBILE TOUCH-TO-LOOK ---
+let touchX = 0;
+let touchY = 0;
+const lookSensitivity = 0.003;
+const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+
+document.addEventListener('touchstart', (e) => {
+    // Only register touch if it's on the canvas (not on the buttons)
+    if (e.touches.length > 0 && e.target.tagName === 'CANVAS') {
+        touchX = e.touches[0].pageX;
+        touchY = e.touches[0].pageY;
+    }
+}, { passive: false });
+
+document.addEventListener('touchmove', (e) => {
+    if (e.touches.length > 0 && e.target.tagName === 'CANVAS' && isSimulating) {
+        e.preventDefault(); // Prevent scrolling the page
+        
+        const deltaX = e.touches[0].pageX - touchX;
+        const deltaY = e.touches[0].pageY - touchY;
+        
+        touchX = e.touches[0].pageX;
+        touchY = e.touches[0].pageY;
+
+        // Rotate camera manually
+        euler.setFromQuaternion(camera.quaternion);
+        euler.y -= deltaX * lookSensitivity;
+        euler.x -= deltaY * lookSensitivity;
+        euler.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, euler.x)); // Prevent flipping upside down
+        camera.quaternion.setFromEuler(euler);
+    }
+}, { passive: false });
+
+// --- MOBILE UI BUTTON WIRING ---
+const setupButton = (id, action) => {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    
+    // Handle touch interactions
+    btn.addEventListener('touchstart', (e) => { e.preventDefault(); moveState[action] = true; });
+    btn.addEventListener('touchend', (e) => { e.preventDefault(); moveState[action] = false; });
+    btn.addEventListener('touchcancel', (e) => { e.preventDefault(); moveState[action] = false; });
+    
+    // Handle mouse clicks on the UI for testing on desktop
+    btn.addEventListener('mousedown', (e) => { moveState[action] = true; });
+    btn.addEventListener('mouseup', (e) => { moveState[action] = false; });
+    btn.addEventListener('mouseleave', (e) => { moveState[action] = false; });
+};
+
+setupButton('btn-forward', 'forward');
+setupButton('btn-backward', 'backward');
+setupButton('btn-left', 'left');
+setupButton('btn-right', 'right');
+
+
 // 6. The Render Loop
 let lastTime = 0;
-window.addEventListener('resize', onWindowResize, false);
 
-function onWindowResize() {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    composer.setSize(window.innerWidth, window.innerHeight); // Keep post-processing crisp
-}
 function animate(currentTime) {
     requestAnimationFrame(animate);
     
@@ -155,7 +209,9 @@ function animate(currentTime) {
 
     customOceanMaterial.uniforms.uTime.value = timeInSeconds * 1.5;
 
-    if (controls.isLocked === true) {
+    // CHANGED: We now check isSimulating instead of controls.isLocked
+    // This allows movement on mobile where PointerLock doesn't exist
+    if (isSimulating) {
         velocity.x -= velocity.x * 5.0 * delta; 
         velocity.z -= velocity.z * 5.0 * delta;
 
@@ -167,11 +223,11 @@ function animate(currentTime) {
         if (moveState.forward || moveState.backward) velocity.z -= direction.z * speed * delta;
         if (moveState.left || moveState.right) velocity.x -= direction.x * speed * delta;
 
+        // Apply movement
         controls.moveRight(-velocity.x * delta);
         controls.moveForward(-velocity.z * delta);
     }
 
-    // CHANGED: We now render the scene through the Composer pipeline to get the Bloom
     composer.render();
 }
 

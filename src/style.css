@@ -19,3 +19,48 @@ body {
 #instructions {
   text-align: center;
 }
+
+/* Mobile Controls Styling */
+#mobile-controls {
+  position: absolute;
+  bottom: 30px;
+  left: 20px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  opacity: 0.3; /* Low opacity as requested */
+  transition: opacity 0.2s;
+}
+
+/* Hide on larger desktop screens */
+@media (min-width: 768px) {
+  #mobile-controls { display: none; }
+}
+
+#mobile-controls:active {
+  opacity: 0.8; /* Lights up slightly when touched */
+}
+
+#mobile-controls button {
+  width: 55px;
+  height: 55px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: white;
+  border-radius: 10px;
+  font-size: 24px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  touch-action: none; /* Prevents double-tap zooming on phones */
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: pointer;
+}
+
+#mobile-controls .row {
+  display: flex;
+  gap: 5px;
+}
