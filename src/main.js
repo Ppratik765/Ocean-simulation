@@ -42,7 +42,7 @@ geometry.rotateX(-Math.PI / 2);
 const ocean = new THREE.Mesh(geometry, customOceanMaterial);
 scene.add(ocean);
 
-new HDRLoader().setPath('/textures/').load('skybox.hdr', function (texture) {
+new HDRLoader().setPath('/textures/').load('skybox_1.hdr', function (texture) {
     texture.mapping = THREE.EquirectangularReflectionMapping;
     scene.background = texture;
     scene.environment = texture;
