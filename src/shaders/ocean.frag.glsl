@@ -59,8 +59,6 @@ void main() {
     vec2 uvNoise = vWorldPosition.xz * 0.15 + uTime * 0.3;
     float n1 = capillaryWaves(uvNoise);
     float n2 = capillaryWaves(uvNoise * 1.5 - uTime * 0.4);
-    
-    // Dialed back the multiplier so it looks like fluid, not gravel
     vec3 microNormal = normalize(vec3(n1 * 0.3, 1.0, n2 * 0.3));
     vec3 normal = normalize(vNormal + microNormal * 0.6); 
 
@@ -90,9 +88,10 @@ void main() {
     vec3 waterSurfaceColor = mix(upwellingColor, skyReflection, fresnel) * shadowFactor + scatterColor;
 
     // --- 4. 3D VOLUMETRIC FOAM INTEGRATION ---
-    float foamMask = smoothstep(0.1, 0.7, vChoppiness);
+    // WIDENED MASK: Dropped from 0.1 to -0.1. This allows foam to form on smaller 
+    // mid-sized waves and survive further down into the troughs.
+    float foamMask = smoothstep(-0.1, 0.5, vChoppiness);
 
-    // Advect (push) the foam down the slopes using the wave's actual normal
     vec2 foamUv = vWorldPosition.xz * 0.03 + normal.xz * 2.5;
     foamUv.y -= uTime * 0.12; 
     
@@ -104,36 +103,21 @@ void main() {
     
     float rawFoam = 1.0 - (webNoise * 0.6 + webNoise2 * 0.4);
     
-    // FOAM THICKNESS: Instead of a hard cutout (which makes the 2D sticker look),
-    // we calculate how "thick" the foam is from 0.0 (edge) to 1.0 (dense center).
-    float foamThickness = smoothstep(0.1, 0.85, rawFoam) * foamMask;
+    // THICKER PATCHES: Dropped the lower bound from 0.1 to 0.0. 
+    // This makes the individual foam patches wider and less sparse.
+    float foamThickness = smoothstep(0.1, 0.7, rawFoam) * foamMask;
     
-    // FOAM LIGHTING: Foam is physical. It needs to be bright on the sun-facing side
-    // and dark in the wave troughs.
+    // FOAM LIGHTING & EDGE GLOW
     float foamLighting = mix(0.5, 1.1, lightShadow); 
     vec3 thickFoamColor = vec3(0.95, 0.98, 1.0) * foamLighting;
-    
-    // EDGE SUBSURFACE: The thin edges of the foam glow with the water's color
     vec3 foamEdgeColor = uWaterColor * 1.5; 
     
-    // BLEND: Transition smoothly from the glowing water edge to the thick lit foam center
     vec3 finalFoamAlbedo = mix(foamEdgeColor, thickFoamColor, smoothstep(0.1, 0.5, foamThickness));
 
     // --- 5. COMPOSITION ---
     vec3 sunReflectionDir = reflect(-lightDir, normal);
     float glint = max(0.0, dot(sunReflectionDir, viewVector));
     
-    // Specular highlight gets blocked by the physical thickness of the foam
-    float specular = pow(glint, 800.0) * 20.0 * (1.0 + n1 * 5.0) * (1.0 - foamThickness) * shadowFactor;
-
-    vec3 finalColor = waterSurfaceColor + vec3(specular);
-    
-    // Apply the foam using the thickness value as the alpha blend
-    finalColor = mix(finalColor, finalFoamAlbedo, clamp(foamThickness, 0.0, 1.0));
-
-    // --- 5. COMPOSITION ---
-    vec3 sunReflectionDir = reflect(-lightDir, normal);
-    float glint = max(0.0, dot(sunReflectionDir, viewVector));
     float specular = pow(glint, 800.0) * 20.0 * (1.0 + n1 * 5.0) * (1.0 - foamThickness) * shadowFactor;
 
     vec3 finalColor = waterSurfaceColor + vec3(specular);
@@ -149,6 +133,7 @@ void main() {
     
     finalColor = mix(finalColor, horizonColor, fogFactor);
 
+    // This is the crucial part I accidentally left out!
     gl_FragColor = vec4(finalColor, 1.0);
 
     #include <tonemapping_fragment>

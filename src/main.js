@@ -16,7 +16,7 @@ import sprayFrag from './shaders/spray.frag.glsl?raw';
 // 1. Scene Setup
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 20000);
-camera.position.set(-200, 95, 0); 
+camera.position.set(-200, 75, 0); 
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
 renderer.setPixelRatio(window.devicePixelRatio);

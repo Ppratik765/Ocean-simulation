@@ -75,11 +75,11 @@ void main() {
     // Keep the particles highly visible
     vAlpha = sprayMask * (1.0 - life) * smoothstep(0.0, 0.05, life); 
 
-    vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
+vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
     
-    // MASSIVE point size increase for thicker spray
-    float pointSize = (3500.0 / -mvPosition.z);
-    gl_PointSize = clamp(pointSize, 10.0, 450.0); // Increased max size drastically
+    // REVERTED: Scaled the particles back down to their tighter, realistic size
+    float pointSize = (800.0 / -mvPosition.z);
+    gl_PointSize = clamp(pointSize, 2.0, 500.0); 
     
     if (sprayMask < 0.05) {
         gl_PointSize = 0.0;

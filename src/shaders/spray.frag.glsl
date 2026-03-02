@@ -11,13 +11,13 @@ void main() {
     float r = dot(cxy, cxy);
     if (r > 1.0) discard;
     
-    // Tighter core: creates a thick center that fades softly only at the very edges
-    float softness = smoothstep(1.0, 0.1, r); 
+    // Keep the soft edges so they look like fluid mist, not hard geometric circles
+    float softness = pow(1.0 - sqrt(r), 2.0); 
     
-    // 80% Aerated White, 20% Deep Water Blue
-    vec3 baseWaterColor = mix(uWaterDeepColor, uWaterColor, 0.5);
-    vec3 mistColor = mix(baseWaterColor, vec3(1.0, 1.0, 1.0), 0.8);
+    // THE FIX: Use the exact color of the ocean. 
+    // We multiply by 1.2 just to simulate a tiny bit of sunlight scattering through the drops.
+    vec3 mistColor = mix(uWaterDeepColor, uWaterColor, 0.9) * 1.2;
 
-    // Boosted the alpha multiplier to 1.5 to make it highly pronounced
-    gl_FragColor = vec4(mistColor, vAlpha * softness * 1.5); 
+    // Render as translucent water droplets
+    gl_FragColor = vec4(mistColor, vAlpha * softness); 
 }
