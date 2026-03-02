@@ -10,6 +10,8 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 
 import oceanVert from './shaders/ocean.vert.glsl?raw';
 import oceanFrag from './shaders/ocean.frag.glsl?raw';
+import sprayVert from './shaders/spray.vert.glsl?raw';
+import sprayFrag from './shaders/spray.frag.glsl?raw';
 
 // 1. Scene Setup
 const scene = new THREE.Scene();
@@ -41,6 +43,47 @@ const geometry = new THREE.PlaneGeometry(10000, 10000, 1024, 1024);
 geometry.rotateX(-Math.PI / 2); 
 const ocean = new THREE.Mesh(geometry, customOceanMaterial);
 scene.add(ocean);
+
+// --- 2.5 THE VOLUMETRIC SPRAY SYSTEM ---
+const particleCount = 250000;
+const sprayGeo = new THREE.BufferGeometry();
+const posArray = new Float32Array(particleCount * 3);
+const randomArray = new Float32Array(particleCount);
+const velArray = new Float32Array(particleCount * 3);
+
+// Scatter 250,000 particles randomly across the 10,000 unit ocean
+for(let i = 0; i < particleCount; i++) {
+    posArray[i * 3] = (Math.random() - 0.5) * 10000; // X
+    posArray[i * 3 + 1] = 0;                         // Y (Flat for now, vertex shader bends it)
+    posArray[i * 3 + 2] = (Math.random() - 0.5) * 10000; // Z
+
+    randomArray[i] = Math.random();
+
+    // Give each droplet a randomized wind trajectory
+    velArray[i * 3] = 1.5 + Math.random();       // Wind pushing X
+    velArray[i * 3 + 1] = 1.0 + Math.random();   // Upward burst force
+    velArray[i * 3 + 2] = 0.5 + Math.random();   // Wind pushing Z
+}
+
+sprayGeo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+sprayGeo.setAttribute('aRandom', new THREE.BufferAttribute(randomArray, 1));
+sprayGeo.setAttribute('aVelocity', new THREE.BufferAttribute(velArray, 3));
+
+const sprayMaterial = new THREE.ShaderMaterial({
+    vertexShader: sprayVert,
+    fragmentShader: sprayFrag,
+    uniforms: { 
+        uTime: { value: 0 },
+        uWaterColor: { value: new THREE.Color(0x1a2b3c) },     // Match your ocean color
+        uWaterDeepColor: { value: new THREE.Color(0x050d14) }  // Match your ocean deep color
+    },
+    transparent: true,
+    depthWrite: false, 
+    blending: THREE.NormalBlending 
+});
+
+const sprayParticles = new THREE.Points(sprayGeo, sprayMaterial);
+scene.add(sprayParticles);
 
 new HDRLoader().setPath('/textures/').load('skybox_1.hdr', function (texture) {
     texture.mapping = THREE.EquirectangularReflectionMapping;
@@ -92,39 +135,33 @@ audioLoader.load('/ocean_sound.mp3', function(buffer) {
     }
 });
 
-// 5. UNIFIED DESKTOP & MOBILE CONTROLS
+// 5. WASD & Mouse Controls
 const controls = new PointerLockControls(camera, renderer.domElement);
 const blocker = document.getElementById('blocker');
 const instructions = document.getElementById('instructions');
 
-// State tracker to allow movement on mobile without PointerLock
-let isSimulating = false; 
-
 instructions.addEventListener('click', () => { 
-    // On desktop, this locks the mouse. On mobile, it often fails silently but that's fine.
     controls.lock(); 
-    isSimulating = true;
-    blocker.style.display = 'none';
-
+    userInteracted = true;
+    
+    // CRITICAL FIX: Forcefully wake up the browser's audio engine
     if (listener.context.state === 'suspended') {
         listener.context.resume();
     }
+    
+    // If the audio is already loaded and ready, play it
     if (audioLoaded && !oceanSound.isPlaying) {
         oceanSound.play();
     }
 });
 
-controls.addEventListener('unlock', () => { 
-    blocker.style.display = 'flex'; 
-    isSimulating = false; // Stop movement if unlocked
-});
+controls.addEventListener('lock', () => { blocker.style.display = 'none'; });
+controls.addEventListener('unlock', () => { blocker.style.display = 'flex'; });
 
-// Movement state
 const moveState = { forward: false, backward: false, left: false, right: false };
 const velocity = new THREE.Vector3();
 const direction = new THREE.Vector3();
 
-// --- DESKTOP KEYBOARD ---
 document.addEventListener('keydown', (event) => {
     switch (event.code) {
         case 'KeyW': moveState.forward = true; break;
@@ -142,64 +179,17 @@ document.addEventListener('keyup', (event) => {
     }
 });
 
-// --- MOBILE TOUCH-TO-LOOK ---
-let touchX = 0;
-let touchY = 0;
-const lookSensitivity = 0.003;
-const euler = new THREE.Euler(0, 0, 0, 'YXZ');
-
-document.addEventListener('touchstart', (e) => {
-    // Only register touch if it's on the canvas (not on the buttons)
-    if (e.touches.length > 0 && e.target.tagName === 'CANVAS') {
-        touchX = e.touches[0].pageX;
-        touchY = e.touches[0].pageY;
-    }
-}, { passive: false });
-
-document.addEventListener('touchmove', (e) => {
-    if (e.touches.length > 0 && e.target.tagName === 'CANVAS' && isSimulating) {
-        e.preventDefault(); // Prevent scrolling the page
-        
-        const deltaX = e.touches[0].pageX - touchX;
-        const deltaY = e.touches[0].pageY - touchY;
-        
-        touchX = e.touches[0].pageX;
-        touchY = e.touches[0].pageY;
-
-        // Rotate camera manually
-        euler.setFromQuaternion(camera.quaternion);
-        euler.y -= deltaX * lookSensitivity;
-        euler.x -= deltaY * lookSensitivity;
-        euler.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, euler.x)); // Prevent flipping upside down
-        camera.quaternion.setFromEuler(euler);
-    }
-}, { passive: false });
-
-// --- MOBILE UI BUTTON WIRING ---
-const setupButton = (id, action) => {
-    const btn = document.getElementById(id);
-    if (!btn) return;
-    
-    // Handle touch interactions
-    btn.addEventListener('touchstart', (e) => { e.preventDefault(); moveState[action] = true; });
-    btn.addEventListener('touchend', (e) => { e.preventDefault(); moveState[action] = false; });
-    btn.addEventListener('touchcancel', (e) => { e.preventDefault(); moveState[action] = false; });
-    
-    // Handle mouse clicks on the UI for testing on desktop
-    btn.addEventListener('mousedown', (e) => { moveState[action] = true; });
-    btn.addEventListener('mouseup', (e) => { moveState[action] = false; });
-    btn.addEventListener('mouseleave', (e) => { moveState[action] = false; });
-};
-
-setupButton('btn-forward', 'forward');
-setupButton('btn-backward', 'backward');
-setupButton('btn-left', 'left');
-setupButton('btn-right', 'right');
-
-
 // 6. The Render Loop
 let lastTime = 0;
-
+window.addEventListener('resize', () => {
+    // Update camera aspect ratio
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    
+    // Force renderer and composer to fill the new screen bounds
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    composer.setSize(window.innerWidth, window.innerHeight);
+});
 function animate(currentTime) {
     requestAnimationFrame(animate);
     
@@ -207,11 +197,10 @@ function animate(currentTime) {
     const delta = lastTime === 0 ? 0 : timeInSeconds - lastTime;
     lastTime = timeInSeconds;
 
-    customOceanMaterial.uniforms.uTime.value = timeInSeconds * 1.5;
+    customOceanMaterial.uniforms.uTime.value = timeInSeconds * 1.25;
+    sprayMaterial.uniforms.uTime.value = timeInSeconds * 1.25; // Sync the particles to the waves
 
-    // CHANGED: We now check isSimulating instead of controls.isLocked
-    // This allows movement on mobile where PointerLock doesn't exist
-    if (isSimulating) {
+    if (controls.isLocked === true) {
         velocity.x -= velocity.x * 5.0 * delta; 
         velocity.z -= velocity.z * 5.0 * delta;
 
@@ -223,11 +212,11 @@ function animate(currentTime) {
         if (moveState.forward || moveState.backward) velocity.z -= direction.z * speed * delta;
         if (moveState.left || moveState.right) velocity.x -= direction.x * speed * delta;
 
-        // Apply movement
         controls.moveRight(-velocity.x * delta);
         controls.moveForward(-velocity.z * delta);
     }
 
+    // CHANGED: We now render the scene through the Composer pipeline to get the Bloom
     composer.render();
 }
 
