@@ -6,6 +6,8 @@ import { RGBELoader as HDRLoader } from 'three/examples/jsm/loaders/RGBELoader.j
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+import { RGBShiftShader } from 'three/examples/jsm/shaders/RGBShiftShader.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 
 import oceanVert from './shaders/ocean.vert.glsl?raw';
@@ -22,7 +24,8 @@ const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "hi
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.2; 
+// LOWERED EXPOSURE: Changed from 1.2 to 1.0 to stop the skybox from turning blown-out white
+renderer.toneMappingExposure = 1.0; 
 document.getElementById('app').appendChild(renderer.domElement);
 
 // 2. The Ocean Material
@@ -51,18 +54,16 @@ const posArray = new Float32Array(particleCount * 3);
 const randomArray = new Float32Array(particleCount);
 const velArray = new Float32Array(particleCount * 3);
 
-// Scatter 250,000 particles randomly across the 10,000 unit ocean
 for(let i = 0; i < particleCount; i++) {
-    posArray[i * 3] = (Math.random() - 0.5) * 10000; // X
-    posArray[i * 3 + 1] = 0;                         // Y (Flat for now, vertex shader bends it)
-    posArray[i * 3 + 2] = (Math.random() - 0.5) * 10000; // Z
+    posArray[i * 3] = (Math.random() - 0.5) * 10000; 
+    posArray[i * 3 + 1] = 0;                         
+    posArray[i * 3 + 2] = (Math.random() - 0.5) * 10000; 
 
     randomArray[i] = Math.random();
 
-    // Give each droplet a randomized wind trajectory
-    velArray[i * 3] = 1.5 + Math.random();       // Wind pushing X
-    velArray[i * 3 + 1] = 1.0 + Math.random();   // Upward burst force
-    velArray[i * 3 + 2] = 0.5 + Math.random();   // Wind pushing Z
+    velArray[i * 3] = 1.5 + Math.random();       
+    velArray[i * 3 + 1] = 1.0 + Math.random();   
+    velArray[i * 3 + 2] = 0.5 + Math.random();   
 }
 
 sprayGeo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
@@ -74,8 +75,8 @@ const sprayMaterial = new THREE.ShaderMaterial({
     fragmentShader: sprayFrag,
     uniforms: { 
         uTime: { value: 0 },
-        uWaterColor: { value: new THREE.Color(0x1a2b3c) },     // Match your ocean color
-        uWaterDeepColor: { value: new THREE.Color(0x050d14) }  // Match your ocean deep color
+        uWaterColor: { value: new THREE.Color(0x1a2b3c) },     
+        uWaterDeepColor: { value: new THREE.Color(0x050d14) }  
     },
     transparent: true,
     depthWrite: false, 
@@ -96,20 +97,25 @@ const sunLight = new THREE.DirectionalLight(0xffffff, 3.0);
 sunLight.position.copy(customOceanMaterial.uniforms.uSunPosition.value).multiplyScalar(100); 
 scene.add(sunLight);
 
-// --- 3. CINEMATIC POST-PROCESSING (BLOOM) ---
+// --- 3. CINEMATIC POST-PROCESSING ---
 const renderScene = new RenderPass(scene, camera);
 
-// Resolution, Strength, Radius, Threshold
+// TIGHTENED BLOOM: Threshold raised to 1.0 so it ONLY targets the literal sun, not the sky
 const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
-bloomPass.threshold = 0.99; // EXTREMELY HIGH: Only the absolute brightest sun pixels will glow
-bloomPass.strength = 0.05;  // DIALED DOWN: Just a subtle optical bleed, not a massive halo
-bloomPass.radius = 0.05;     // TIGHTENED: Keeps the glow very close to the light source
+bloomPass.threshold = 1.0; 
+bloomPass.strength = 0.2;  
+bloomPass.radius = 0.1;     
+
+// NEW: CHROMATIC ABERRATION (Simulates physical camera lens distortion)
+const chromaticPass = new ShaderPass(RGBShiftShader);
+chromaticPass.uniforms['amount'].value = 0.0015; // Subtle RGB split on the edges of the screen
 
 const outputPass = new OutputPass(); 
 
 const composer = new EffectComposer(renderer);
 composer.addPass(renderScene);
 composer.addPass(bloomPass);
+composer.addPass(chromaticPass); // Apply the lens flare/aberration effect
 composer.addPass(outputPass);
 
 // --- 4. SPATIAL AUDIO INTEGRATION ---
@@ -119,7 +125,6 @@ camera.add(listener);
 const oceanSound = new THREE.Audio(listener);
 const audioLoader = new THREE.AudioLoader();
 
-// Flags to handle the race condition
 let audioLoaded = false;
 let userInteracted = false;
 
@@ -129,39 +134,45 @@ audioLoader.load('/ocean_sound.mp3', function(buffer) {
     oceanSound.setVolume(0.99); 
     audioLoaded = true;
 
-    // If the user already clicked BEFORE the audio finished loading, play it now.
     if (userInteracted && listener.context.state === 'running') {
         oceanSound.play();
     }
 });
 
-// 5. WASD & Mouse Controls
+// --- 5. UNIFIED DESKTOP & MOBILE CONTROLS ---
 const controls = new PointerLockControls(camera, renderer.domElement);
 const blocker = document.getElementById('blocker');
 const instructions = document.getElementById('instructions');
 
+// RESTORED: This flag allows movement on mobile devices where PointerLock fails
+let isSimulating = false; 
+
 instructions.addEventListener('click', () => { 
     controls.lock(); 
     userInteracted = true;
+    isSimulating = true;
+    blocker.style.display = 'none';
     
-    // CRITICAL FIX: Forcefully wake up the browser's audio engine
     if (listener.context.state === 'suspended') {
         listener.context.resume();
     }
     
-    // If the audio is already loaded and ready, play it
     if (audioLoaded && !oceanSound.isPlaying) {
         oceanSound.play();
     }
 });
 
 controls.addEventListener('lock', () => { blocker.style.display = 'none'; });
-controls.addEventListener('unlock', () => { blocker.style.display = 'flex'; });
+controls.addEventListener('unlock', () => { 
+    blocker.style.display = 'flex'; 
+    isSimulating = false; 
+});
 
 const moveState = { forward: false, backward: false, left: false, right: false };
 const velocity = new THREE.Vector3();
 const direction = new THREE.Vector3();
 
+// Keyboard listeners for desktop
 document.addEventListener('keydown', (event) => {
     switch (event.code) {
         case 'KeyW': moveState.forward = true; break;
@@ -179,17 +190,64 @@ document.addEventListener('keyup', (event) => {
     }
 });
 
+// RESTORED: Mobile Touch-to-Look Logic
+let touchX = 0;
+let touchY = 0;
+const lookSensitivity = 0.003;
+const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+
+document.addEventListener('touchstart', (e) => {
+    if (e.touches.length > 0 && e.target.tagName === 'CANVAS') {
+        touchX = e.touches[0].pageX;
+        touchY = e.touches[0].pageY;
+    }
+}, { passive: false });
+
+document.addEventListener('touchmove', (e) => {
+    if (e.touches.length > 0 && e.target.tagName === 'CANVAS' && isSimulating) {
+        e.preventDefault(); 
+        const deltaX = e.touches[0].pageX - touchX;
+        const deltaY = e.touches[0].pageY - touchY;
+        touchX = e.touches[0].pageX;
+        touchY = e.touches[0].pageY;
+
+        euler.setFromQuaternion(camera.quaternion);
+        euler.y -= deltaX * lookSensitivity;
+        euler.x -= deltaY * lookSensitivity;
+        euler.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, euler.x)); 
+        camera.quaternion.setFromEuler(euler);
+    }
+}, { passive: false });
+
+// RESTORED: Mobile UI Button Wiring
+const setupButton = (id, action) => {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    
+    btn.addEventListener('touchstart', (e) => { e.preventDefault(); moveState[action] = true; });
+    btn.addEventListener('touchend', (e) => { e.preventDefault(); moveState[action] = false; });
+    btn.addEventListener('touchcancel', (e) => { e.preventDefault(); moveState[action] = false; });
+    
+    btn.addEventListener('mousedown', (e) => { moveState[action] = true; });
+    btn.addEventListener('mouseup', (e) => { moveState[action] = false; });
+    btn.addEventListener('mouseleave', (e) => { moveState[action] = false; });
+};
+
+setupButton('btn-forward', 'forward');
+setupButton('btn-backward', 'backward');
+setupButton('btn-left', 'left');
+setupButton('btn-right', 'right');
+
 // 6. The Render Loop
 let lastTime = 0;
 window.addEventListener('resize', () => {
-    // Update camera aspect ratio
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     
-    // Force renderer and composer to fill the new screen bounds
     renderer.setSize(window.innerWidth, window.innerHeight);
     composer.setSize(window.innerWidth, window.innerHeight);
 });
+
 function animate(currentTime) {
     requestAnimationFrame(animate);
     
@@ -198,9 +256,10 @@ function animate(currentTime) {
     lastTime = timeInSeconds;
 
     customOceanMaterial.uniforms.uTime.value = timeInSeconds * 1.25;
-    sprayMaterial.uniforms.uTime.value = timeInSeconds * 1.25; // Sync the particles to the waves
+    sprayMaterial.uniforms.uTime.value = timeInSeconds * 1.25; 
 
-    if (controls.isLocked === true) {
+    // RESTORED: Check isSimulating instead of controls.isLocked to allow mobile movement
+    if (isSimulating) {
         velocity.x -= velocity.x * 5.0 * delta; 
         velocity.z -= velocity.z * 5.0 * delta;
 
@@ -216,7 +275,6 @@ function animate(currentTime) {
         controls.moveForward(-velocity.z * delta);
     }
 
-    // CHANGED: We now render the scene through the Composer pipeline to get the Bloom
     composer.render();
 }
 
