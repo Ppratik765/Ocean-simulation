@@ -271,7 +271,7 @@ function animate(currentTime) {
         direction.x = Number(moveState.right) - Number(moveState.left);
         direction.normalize();
 
-        const speed = 500.0; 
+        const speed = 700.0; 
         if (moveState.forward || moveState.backward) velocity.z -= direction.z * speed * delta;
         if (moveState.left || moveState.right) velocity.x -= direction.x * speed * delta;
 
