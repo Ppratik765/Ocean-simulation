@@ -2,7 +2,6 @@ import * as THREE from 'three';
 import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
 import { RGBELoader as HDRLoader } from 'three/examples/jsm/loaders/RGBELoader.js'; 
 
-// --- POST-PROCESSING IMPORTS ---
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
@@ -13,7 +12,6 @@ import oceanFrag from './shaders/ocean.frag.glsl?raw';
 import sprayVert from './shaders/spray.vert.glsl?raw';
 import sprayFrag from './shaders/spray.frag.glsl?raw';
 
-// 1. Scene Setup
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 20000);
 camera.position.set(-200, 75, 0); 
@@ -22,11 +20,8 @@ const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "hi
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-// Keeps the skybox from blowing out into pure white
-renderer.toneMappingExposure = 0.95; 
 document.getElementById('app').appendChild(renderer.domElement);
 
-// 2. The Ocean Material
 const customOceanMaterial = new THREE.ShaderMaterial({
     vertexShader: oceanVert,
     fragmentShader: oceanFrag,
@@ -45,7 +40,6 @@ geometry.rotateX(-Math.PI / 2);
 const ocean = new THREE.Mesh(geometry, customOceanMaterial);
 scene.add(ocean);
 
-// --- 2.5 THE VOLUMETRIC SPRAY SYSTEM ---
 const particleCount = 250000;
 const sprayGeo = new THREE.BufferGeometry();
 const posArray = new Float32Array(particleCount * 3);
@@ -56,9 +50,7 @@ for(let i = 0; i < particleCount; i++) {
     posArray[i * 3] = (Math.random() - 0.5) * 10000; 
     posArray[i * 3 + 1] = 0;                         
     posArray[i * 3 + 2] = (Math.random() - 0.5) * 10000; 
-
     randomArray[i] = Math.random();
-
     velArray[i * 3] = 1.5 + Math.random();       
     velArray[i * 3 + 1] = 1.0 + Math.random();   
     velArray[i * 3 + 2] = 0.5 + Math.random();   
@@ -84,38 +76,79 @@ const sprayMaterial = new THREE.ShaderMaterial({
 const sprayParticles = new THREE.Points(sprayGeo, sprayMaterial);
 scene.add(sprayParticles);
 
-new HDRLoader().setPath('/textures/').load('skybox_1.hdr', function (texture) {
+// --- CINEMATIC POST-PROCESSING ---
+const renderScene = new RenderPass(scene, camera);
+const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+bloomPass.threshold = 0.99; 
+bloomPass.radius = 0.05;    
+
+const outputPass = new OutputPass(); 
+const composer = new EffectComposer(renderer);
+composer.addPass(renderScene);
+composer.addPass(bloomPass);
+composer.addPass(outputPass);
+
+// --- DYNAMIC SKYBOX ENGINE & TRANSITIONS ---
+let currentSkyboxIndex = 0;
+// THE FIX: Updated the total count to exactly 5 (indices 0, 1, 2, 3, 4)
+const totalSkyboxes = 5; 
+const hdrLoader = new HDRLoader().setPath('/textures/');
+
+// Transition state variables
+let targetExposure = 0.95;
+let currentExposure = 0.95;
+let targetBloom = 0.05;
+let currentBloom = 0.05;
+let isTransitioning = false;
+
+renderer.toneMappingExposure = currentExposure;
+bloomPass.strength = currentBloom;
+
+function switchSkybox(direction) {
+    if (isTransitioning) return;
+    isTransitioning = true;
+    
+    // 1. Fade out (Close camera aperture)
+    targetExposure = 0.0;
+    
+    // 2. Wait 400ms for screen to go black, then seamlessly swap assets
+    setTimeout(() => {
+        let nextIndex = (currentSkyboxIndex + direction + totalSkyboxes) % totalSkyboxes;
+        
+        hdrLoader.load(`skybox_${nextIndex}.hdr`, function (texture) {
+            texture.mapping = THREE.EquirectangularReflectionMapping;
+            scene.background = texture;
+            scene.environment = texture;
+            customOceanMaterial.uniforms.uEnvMap.value = texture;
+            
+            currentSkyboxIndex = nextIndex;
+            
+            // 3. Disable bloom for night skies (indices 3 and 4)
+            targetBloom = currentSkyboxIndex >= 3 ? 0.0 : 0.05;
+            
+            // 4. Fade back in (Open camera aperture)
+            targetExposure = 0.95;
+            
+            // Release lock after fade completes
+            setTimeout(() => { isTransitioning = false; }, 500);
+        });
+    }, 400); 
+}
+
+// Initial Load
+hdrLoader.load(`skybox_${currentSkyboxIndex}.hdr`, function (texture) {
     texture.mapping = THREE.EquirectangularReflectionMapping;
     scene.background = texture;
     scene.environment = texture;
     customOceanMaterial.uniforms.uEnvMap.value = texture;
 });
 
-// --- LIGHTING ---
 const sunLight = new THREE.DirectionalLight(0xffffff, 3.0);
 sunLight.position.copy(customOceanMaterial.uniforms.uSunPosition.value).multiplyScalar(100); 
 scene.add(sunLight);
 
-// --- 3. CINEMATIC POST-PROCESSING (BLOOM) ---
-const renderScene = new RenderPass(scene, camera);
-
-// Dialed back the strength so it just softens the highlights naturally
-const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
-bloomPass.threshold = 0.99; 
-bloomPass.strength = 0.05;  
-bloomPass.radius = 0.05;    
-
-const outputPass = new OutputPass(); 
-
-const composer = new EffectComposer(renderer);
-composer.addPass(renderScene);
-composer.addPass(bloomPass);
-composer.addPass(outputPass);
-
-// --- 4. SPATIAL AUDIO INTEGRATION ---
 const listener = new THREE.AudioListener();
 camera.add(listener); 
-
 const oceanSound = new THREE.Audio(listener);
 const audioLoader = new THREE.AudioLoader();
 
@@ -127,17 +160,12 @@ audioLoader.load('/ocean_sound.mp3', function(buffer) {
     oceanSound.setLoop(true);
     oceanSound.setVolume(0.99); 
     audioLoaded = true;
-
-    if (userInteracted && listener.context.state === 'running') {
-        oceanSound.play();
-    }
+    if (userInteracted && listener.context.state === 'running') oceanSound.play();
 });
 
-// --- 5. UNIFIED DESKTOP & MOBILE CONTROLS ---
 const controls = new PointerLockControls(camera, renderer.domElement);
 const blocker = document.getElementById('blocker');
 const instructions = document.getElementById('instructions');
-
 let isSimulating = false; 
 
 instructions.addEventListener('click', () => { 
@@ -145,7 +173,6 @@ instructions.addEventListener('click', () => {
     userInteracted = true;
     isSimulating = true;
     blocker.style.display = 'none';
-    
     if (listener.context.state === 'suspended') listener.context.resume();
     if (audioLoaded && !oceanSound.isPlaying) oceanSound.play();
 });
@@ -159,13 +186,14 @@ const moveState = { forward: false, backward: false, left: false, right: false }
 const velocity = new THREE.Vector3();
 const direction = new THREE.Vector3();
 
-// Desktop Keyboard
 document.addEventListener('keydown', (event) => {
     switch (event.code) {
         case 'KeyW': moveState.forward = true; break;
         case 'KeyA': moveState.left = true; break;
         case 'KeyS': moveState.backward = true; break;
         case 'KeyD': moveState.right = true; break;
+        case 'KeyQ': switchSkybox(-1); break; // Cycle backwards
+        case 'KeyE': switchSkybox(1); break;  // Cycle forwards
     }
 });
 document.addEventListener('keyup', (event) => {
@@ -177,7 +205,6 @@ document.addEventListener('keyup', (event) => {
     }
 });
 
-// Mobile Touch-to-Look
 let touchX = 0;
 let touchY = 0;
 const lookSensitivity = 0.003;
@@ -195,10 +222,8 @@ document.addEventListener('touchmove', (e) => {
         e.preventDefault(); 
         const deltaX = e.touches[0].pageX - touchX;
         const deltaY = e.touches[0].pageY - touchY;
-        
         touchX = e.touches[0].pageX;
         touchY = e.touches[0].pageY;
-
         euler.setFromQuaternion(camera.quaternion);
         euler.y -= deltaX * lookSensitivity;
         euler.x -= deltaY * lookSensitivity;
@@ -207,26 +232,6 @@ document.addEventListener('touchmove', (e) => {
     }
 }, { passive: false });
 
-// Mobile UI Button Wiring
-const setupButton = (id, action) => {
-    const btn = document.getElementById(id);
-    if (!btn) return;
-    
-    btn.addEventListener('touchstart', (e) => { e.preventDefault(); moveState[action] = true; });
-    btn.addEventListener('touchend', (e) => { e.preventDefault(); moveState[action] = false; });
-    btn.addEventListener('touchcancel', (e) => { e.preventDefault(); moveState[action] = false; });
-    
-    btn.addEventListener('mousedown', (e) => { moveState[action] = true; });
-    btn.addEventListener('mouseup', (e) => { moveState[action] = false; });
-    btn.addEventListener('mouseleave', (e) => { moveState[action] = false; });
-};
-
-setupButton('btn-forward', 'forward');
-setupButton('btn-backward', 'backward');
-setupButton('btn-left', 'left');
-setupButton('btn-right', 'right');
-
-// 6. The Render Loop
 let lastTime = 0;
 window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
@@ -244,6 +249,19 @@ function animate(currentTime) {
 
     customOceanMaterial.uniforms.uTime.value = timeInSeconds * 1.25;
     sprayMaterial.uniforms.uTime.value = timeInSeconds * 1.25; 
+
+    // --- SMOOTH TRANSITION LERPING ---
+    if (currentExposure !== targetExposure) {
+        currentExposure += (targetExposure - currentExposure) * delta * 8.0;
+        if (Math.abs(currentExposure - targetExposure) < 0.01) currentExposure = targetExposure;
+        renderer.toneMappingExposure = currentExposure;
+    }
+
+    if (currentBloom !== targetBloom) {
+        currentBloom += (targetBloom - currentBloom) * delta * 8.0;
+        if (Math.abs(currentBloom - targetBloom) < 0.001) currentBloom = targetBloom;
+        bloomPass.strength = currentBloom;
+    }
 
     if (isSimulating) {
         velocity.x -= velocity.x * 5.0 * delta; 
