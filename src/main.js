@@ -2,12 +2,11 @@ import * as THREE from 'three';
 import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
 import { RGBELoader as HDRLoader } from 'three/examples/jsm/loaders/RGBELoader.js'; 
 
-// --- POST-PROCESSING & OPTICS IMPORTS ---
+// --- POST-PROCESSING IMPORTS ---
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
-import { Lensflare, LensflareElement } from 'three/examples/jsm/objects/Lensflare.js'; // Added Lensflare
 
 import oceanVert from './shaders/ocean.vert.glsl?raw';
 import oceanFrag from './shaders/ocean.frag.glsl?raw';
@@ -23,7 +22,7 @@ const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "hi
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-// FIXED: Lowered exposure from 1.2 to 0.95 to prevent the skybox from blowing out into pure white
+// Keeps the skybox from blowing out into pure white
 renderer.toneMappingExposure = 0.95; 
 document.getElementById('app').appendChild(renderer.domElement);
 
@@ -92,36 +91,9 @@ new HDRLoader().setPath('/textures/').load('skybox_1.hdr', function (texture) {
     customOceanMaterial.uniforms.uEnvMap.value = texture;
 });
 
-// --- LIGHTING & CINEMATIC LENS FLARES ---
+// --- LIGHTING ---
 const sunLight = new THREE.DirectionalLight(0xffffff, 3.0);
 sunLight.position.copy(customOceanMaterial.uniforms.uSunPosition.value).multiplyScalar(100); 
-
-// Procedurally generate lens flare textures so you don't need to download external images
-function createFlareTexture(size, innerColor, outerColor) {
-    const canvas = document.createElement('canvas');
-    canvas.width = size;
-    canvas.height = size;
-    const context = canvas.getContext('2d');
-    const gradient = context.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
-    gradient.addColorStop(0, innerColor);
-    gradient.addColorStop(1, outerColor);
-    context.fillStyle = gradient;
-    context.fillRect(0, 0, size, size);
-    return new THREE.CanvasTexture(canvas);
-}
-
-// Generate the core sun glow and the scattered blue/warm lens artifacts
-const flareMain = createFlareTexture(512, 'rgba(255,255,255,1)', 'rgba(255,255,255,0)');
-const flareArtifact = createFlareTexture(512, 'rgba(100,150,255,0.4)', 'rgba(100,150,255,0)');
-
-const lensflare = new Lensflare();
-lensflare.addElement(new LensflareElement(flareMain, 600, 0, new THREE.Color(0xffffff)));
-lensflare.addElement(new LensflareElement(flareArtifact, 60, 0.6));
-lensflare.addElement(new LensflareElement(flareArtifact, 70, 0.7));
-lensflare.addElement(new LensflareElement(flareArtifact, 120, 0.9));
-lensflare.addElement(new LensflareElement(flareArtifact, 70, 1.0));
-
-sunLight.add(lensflare);
 scene.add(sunLight);
 
 // --- 3. CINEMATIC POST-PROCESSING (BLOOM) ---
@@ -130,7 +102,7 @@ const renderScene = new RenderPass(scene, camera);
 // Dialed back the strength so it just softens the highlights naturally
 const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
 bloomPass.threshold = 0.99; 
-bloomPass.strength = 0.03;  
+bloomPass.strength = 0.05;  
 bloomPass.radius = 0.05;    
 
 const outputPass = new OutputPass(); 
@@ -166,7 +138,6 @@ const controls = new PointerLockControls(camera, renderer.domElement);
 const blocker = document.getElementById('blocker');
 const instructions = document.getElementById('instructions');
 
-// RESTORED: This flag ensures movement works on mobile even when PointerLock fails
 let isSimulating = false; 
 
 instructions.addEventListener('click', () => { 
@@ -206,7 +177,7 @@ document.addEventListener('keyup', (event) => {
     }
 });
 
-// RESTORED: Mobile Touch-to-Look
+// Mobile Touch-to-Look
 let touchX = 0;
 let touchY = 0;
 const lookSensitivity = 0.003;
@@ -236,7 +207,7 @@ document.addEventListener('touchmove', (e) => {
     }
 }, { passive: false });
 
-// RESTORED: Mobile UI Button Wiring
+// Mobile UI Button Wiring
 const setupButton = (id, action) => {
     const btn = document.getElementById(id);
     if (!btn) return;
@@ -274,7 +245,6 @@ function animate(currentTime) {
     customOceanMaterial.uniforms.uTime.value = timeInSeconds * 1.25;
     sprayMaterial.uniforms.uTime.value = timeInSeconds * 1.25; 
 
-    // RESTORED: Checks isSimulating so you can move on mobile without PointerLock
     if (isSimulating) {
         velocity.x -= velocity.x * 5.0 * delta; 
         velocity.z -= velocity.z * 5.0 * delta;
