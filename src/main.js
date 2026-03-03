@@ -2,13 +2,12 @@ import * as THREE from 'three';
 import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
 import { RGBELoader as HDRLoader } from 'three/examples/jsm/loaders/RGBELoader.js'; 
 
-// --- POST-PROCESSING IMPORTS ---
+// --- POST-PROCESSING & OPTICS IMPORTS ---
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
-import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
-import { RGBShiftShader } from 'three/examples/jsm/shaders/RGBShiftShader.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { Lensflare, LensflareElement } from 'three/examples/jsm/objects/Lensflare.js'; // Added Lensflare
 
 import oceanVert from './shaders/ocean.vert.glsl?raw';
 import oceanFrag from './shaders/ocean.frag.glsl?raw';
@@ -24,8 +23,8 @@ const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "hi
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-// LOWERED EXPOSURE: Changed from 1.2 to 1.0 to stop the skybox from turning blown-out white
-renderer.toneMappingExposure = 1.0; 
+// FIXED: Lowered exposure from 1.2 to 0.95 to prevent the skybox from blowing out into pure white
+renderer.toneMappingExposure = 0.95; 
 document.getElementById('app').appendChild(renderer.domElement);
 
 // 2. The Ocean Material
@@ -93,29 +92,52 @@ new HDRLoader().setPath('/textures/').load('skybox_1.hdr', function (texture) {
     customOceanMaterial.uniforms.uEnvMap.value = texture;
 });
 
+// --- LIGHTING & CINEMATIC LENS FLARES ---
 const sunLight = new THREE.DirectionalLight(0xffffff, 3.0);
 sunLight.position.copy(customOceanMaterial.uniforms.uSunPosition.value).multiplyScalar(100); 
+
+// Procedurally generate lens flare textures so you don't need to download external images
+function createFlareTexture(size, innerColor, outerColor) {
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const context = canvas.getContext('2d');
+    const gradient = context.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
+    gradient.addColorStop(0, innerColor);
+    gradient.addColorStop(1, outerColor);
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, size, size);
+    return new THREE.CanvasTexture(canvas);
+}
+
+// Generate the core sun glow and the scattered blue/warm lens artifacts
+const flareMain = createFlareTexture(512, 'rgba(255,255,255,1)', 'rgba(255,255,255,0)');
+const flareArtifact = createFlareTexture(512, 'rgba(100,150,255,0.4)', 'rgba(100,150,255,0)');
+
+const lensflare = new Lensflare();
+lensflare.addElement(new LensflareElement(flareMain, 600, 0, new THREE.Color(0xffffff)));
+lensflare.addElement(new LensflareElement(flareArtifact, 60, 0.6));
+lensflare.addElement(new LensflareElement(flareArtifact, 70, 0.7));
+lensflare.addElement(new LensflareElement(flareArtifact, 120, 0.9));
+lensflare.addElement(new LensflareElement(flareArtifact, 70, 1.0));
+
+sunLight.add(lensflare);
 scene.add(sunLight);
 
-// --- 3. CINEMATIC POST-PROCESSING ---
+// --- 3. CINEMATIC POST-PROCESSING (BLOOM) ---
 const renderScene = new RenderPass(scene, camera);
 
-// TIGHTENED BLOOM: Threshold raised to 1.0 so it ONLY targets the literal sun, not the sky
+// Dialed back the strength so it just softens the highlights naturally
 const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
-bloomPass.threshold = 1.0; 
-bloomPass.strength = 0.2;  
-bloomPass.radius = 0.1;     
-
-// NEW: CHROMATIC ABERRATION (Simulates physical camera lens distortion)
-const chromaticPass = new ShaderPass(RGBShiftShader);
-chromaticPass.uniforms['amount'].value = 0.0015; // Subtle RGB split on the edges of the screen
+bloomPass.threshold = 0.99; 
+bloomPass.strength = 0.03;  
+bloomPass.radius = 0.05;    
 
 const outputPass = new OutputPass(); 
 
 const composer = new EffectComposer(renderer);
 composer.addPass(renderScene);
 composer.addPass(bloomPass);
-composer.addPass(chromaticPass); // Apply the lens flare/aberration effect
 composer.addPass(outputPass);
 
 // --- 4. SPATIAL AUDIO INTEGRATION ---
@@ -144,7 +166,7 @@ const controls = new PointerLockControls(camera, renderer.domElement);
 const blocker = document.getElementById('blocker');
 const instructions = document.getElementById('instructions');
 
-// RESTORED: This flag allows movement on mobile devices where PointerLock fails
+// RESTORED: This flag ensures movement works on mobile even when PointerLock fails
 let isSimulating = false; 
 
 instructions.addEventListener('click', () => { 
@@ -153,26 +175,20 @@ instructions.addEventListener('click', () => {
     isSimulating = true;
     blocker.style.display = 'none';
     
-    if (listener.context.state === 'suspended') {
-        listener.context.resume();
-    }
-    
-    if (audioLoaded && !oceanSound.isPlaying) {
-        oceanSound.play();
-    }
+    if (listener.context.state === 'suspended') listener.context.resume();
+    if (audioLoaded && !oceanSound.isPlaying) oceanSound.play();
 });
 
-controls.addEventListener('lock', () => { blocker.style.display = 'none'; });
 controls.addEventListener('unlock', () => { 
     blocker.style.display = 'flex'; 
-    isSimulating = false; 
+    isSimulating = false;
 });
 
 const moveState = { forward: false, backward: false, left: false, right: false };
 const velocity = new THREE.Vector3();
 const direction = new THREE.Vector3();
 
-// Keyboard listeners for desktop
+// Desktop Keyboard
 document.addEventListener('keydown', (event) => {
     switch (event.code) {
         case 'KeyW': moveState.forward = true; break;
@@ -190,7 +206,7 @@ document.addEventListener('keyup', (event) => {
     }
 });
 
-// RESTORED: Mobile Touch-to-Look Logic
+// RESTORED: Mobile Touch-to-Look
 let touchX = 0;
 let touchY = 0;
 const lookSensitivity = 0.003;
@@ -208,6 +224,7 @@ document.addEventListener('touchmove', (e) => {
         e.preventDefault(); 
         const deltaX = e.touches[0].pageX - touchX;
         const deltaY = e.touches[0].pageY - touchY;
+        
         touchX = e.touches[0].pageX;
         touchY = e.touches[0].pageY;
 
@@ -243,7 +260,6 @@ let lastTime = 0;
 window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
-    
     renderer.setSize(window.innerWidth, window.innerHeight);
     composer.setSize(window.innerWidth, window.innerHeight);
 });
@@ -258,7 +274,7 @@ function animate(currentTime) {
     customOceanMaterial.uniforms.uTime.value = timeInSeconds * 1.25;
     sprayMaterial.uniforms.uTime.value = timeInSeconds * 1.25; 
 
-    // RESTORED: Check isSimulating instead of controls.isLocked to allow mobile movement
+    // RESTORED: Checks isSimulating so you can move on mobile without PointerLock
     if (isSimulating) {
         velocity.x -= velocity.x * 5.0 * delta; 
         velocity.z -= velocity.z * 5.0 * delta;
