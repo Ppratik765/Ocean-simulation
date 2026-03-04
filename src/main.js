@@ -158,7 +158,9 @@ gltfLoader.load('/bird.glb', (gltf) => {
 
     if (gltf.animations?.length > 0) {
         mixer = new THREE.AnimationMixer(birdModel);
-        mixer.clipAction(gltf.animations[0]).play();
+        const leadAction = mixer.clipAction(gltf.animations[0]);
+        leadAction.timeScale = 0.5;   // half-speed flap — looks natural
+        leadAction.play();
         allMixers.push(mixer);
     }
 
@@ -182,15 +184,146 @@ gltfLoader.load('/bird.glb', (gltf) => {
 
         if (gltf.animations?.length > 0) {
             const m = new THREE.AnimationMixer(cloneScene);
-            m.clipAction(gltf.animations[0]).play();
-            // Phase-offset so wingmen don't all flap in mechanical sync
-            m.update(i * 0.37);
+            const action = m.clipAction(gltf.animations[0]);
+            action.timeScale = 0.5;   // match lead bird's half-speed flap
+            action.play();
+            m.update(i * 0.37);   // phase-offset so wingmen don't flap in sync
             allMixers.push(m);
         }
     });
 });
 
-// (Trail system removed)
+// ─────────────────────────────────────────────
+// 5. WORLD OBJECT POOL
+//
+// ARCHITECTURE:
+//   - Load one template GLB per prop type.
+//   - Clone into a fixed pool of POOL_SIZE instances at startup.
+//   - Each frame, any prop that has fallen RECYCLE_DIST behind the camera
+//     is teleported to a random position ahead — identical to the ocean
+//     tile treadmill, giving the illusion of an endlessly populated sea.
+//   - Y position is set each frame from a lightweight JS Gerstner
+//     approximation so props convincingly ride the waves.
+//
+// GOLDEN PARTICLE SYSTEM:
+//   - Each treasure_chest instance gets a small Points cloud of 40 golden
+//     sparkles that slowly spiral upward and loop.
+//
+// PROXIMITY SCATTER:
+//   - When birdGroup comes within SCATTER_RADIUS of any prop, the
+//     V-formation wingmen drift outward and then snap back when clear.
+// ─────────────────────────────────────────────
+
+// ── Gentle bob offset — props don't chase the full wave, they just gently
+//    rise and fall by ±1.5 units on a slow personal timer.  This avoids the
+//    glitching caused by trying to match the fast Gerstner math every frame.
+function getBobOffset(phase, t) {
+    return Math.sin(t * 0.4 + phase) * 1.5;
+}
+
+// ── Pool configuration ─────────────────────────────────────────────────────
+const PROP_DISTRIBUTION = [
+    { file: 'boat_1',         count: 3, scale: 1.0,  yBase: -2.5 },
+    { file: 'boat_2',         count: 3, scale: 1.0,  yBase: -2.5 },
+    { file: 'barrel',         count: 4, scale: 1.2,  yBase: -0.6 },
+    { file: 'crate',          count: 4, scale: 1.0,  yBase: -0.5 },
+    { file: 'treasure_chest', count: 4, scale: 0.9,  yBase: -0.5 },
+];
+const POOL_SIZE     = PROP_DISTRIBUTION.reduce((s, d) => s + d.count, 0);
+const SPAWN_RANGE_X = 2500;
+const SPAWN_RANGE_Z = 5000;
+// Recycle when prop is more than 2000 units BEHIND the camera's Z
+// (camera flies in -Z, so "behind" = prop.z > camera.z + 2000)
+const RECYCLE_BEHIND = 2000;
+
+// Each entry: { mesh, type, bobPhase, rotSpeed }
+const propPool        = [];
+const loadedTemplates = {};
+let   propsLoaded     = 0;
+const TOTAL_PROP_TYPES = PROP_DISTRIBUTION.length;
+
+// ── Golden particle geometry (shared across all chest instances) ────────────
+const SPARKLE_COUNT  = 40;
+const sparkleGeo     = new THREE.BufferGeometry();
+const sparklePos     = new Float32Array(SPARKLE_COUNT * 3);
+const sparklePhases  = new Float32Array(SPARKLE_COUNT);
+for (let i = 0; i < SPARKLE_COUNT; i++) {
+    // Spread in a small 3-unit radius at Y=0; animated upward each frame
+    sparklePos[i*3]   = (Math.random() - 0.5) * 3;
+    sparklePos[i*3+1] = Math.random() * 4;
+    sparklePos[i*3+2] = (Math.random() - 0.5) * 3;
+    sparklePhases[i]  = Math.random() * Math.PI * 2;
+}
+sparkleGeo.setAttribute('position', new THREE.BufferAttribute(sparklePos, 3));
+const sparkleMat = new THREE.PointsMaterial({
+    color: 0xffd700,
+    size: 0.35,
+    transparent: true,
+    opacity: 0.75,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    sizeAttenuation: true,
+});
+
+// ── Scatter state for wingmen ──────────────────────────────────────────────
+// targetScatter[i] and currentScatter[i] are XZ offsets (world units)
+// applied on top of V_OFFSETS so the wingmen drift when near a prop.
+const SCATTER_RADIUS = 180;
+const scatterTargets  = Array.from({ length: 4 }, () => new THREE.Vector3());
+const scatterCurrents = Array.from({ length: 4 }, () => new THREE.Vector3());
+let   isScattering    = false;
+let   scatterCooldown = 0;   // seconds before allowing re-scatter
+
+// ── Loader ────────────────────────────────────────────────────────────────
+function onPropTypeLoaded(typeDef, gltf) {
+    const template = gltf.scene;
+    // Uniform scale from config
+    template.scale.setScalar(typeDef.scale);
+    // Prevent textures from being garbage-collected after first clone
+    template.traverse(c => { if (c.isMesh) c.castShadow = false; });
+    loadedTemplates[typeDef.file] = template;
+
+    propsLoaded++;
+    if (propsLoaded === TOTAL_PROP_TYPES) buildPropPool();
+}
+
+PROP_DISTRIBUTION.forEach(typeDef => {
+    gltfLoader.load(`/${typeDef.file}.glb`, (gltf) => onPropTypeLoaded(typeDef, gltf));
+});
+
+// ── Build pool once all templates are ready ────────────────────────────────
+function buildPropPool() {
+    PROP_DISTRIBUTION.forEach(typeDef => {
+        const template = loadedTemplates[typeDef.file];
+        for (let n = 0; n < typeDef.count; n++) {
+            const mesh = template.clone(true);
+
+            const wx = (Math.random() - 0.5) * SPAWN_RANGE_X * 2;
+            const wz = -Math.random() * SPAWN_RANGE_Z;
+            // Y = yBase so boat sits partially submerged; bob animates on top
+            mesh.position.set(wx, typeDef.yBase, wz);
+            // Fixed random yaw set ONCE — never changed again
+            mesh.rotation.set(0, Math.random() * Math.PI * 2, 0);
+            scene.add(mesh);
+
+            let sparklePoints = null;
+            if (typeDef.file === 'treasure_chest') {
+                const geo = sparkleGeo.clone();
+                sparklePoints = new THREE.Points(geo, sparkleMat);
+                sparklePoints.position.y = 1.5;
+                mesh.add(sparklePoints);
+            }
+
+            propPool.push({
+                mesh,
+                type:        typeDef.file,
+                yBase:       typeDef.yBase,
+                bobPhase:    Math.random() * Math.PI * 2,
+                sparklePoints,
+            });
+        }
+    });
+}
 
 // ─────────────────────────────────────────────
 // 6. POST-PROCESSING
@@ -445,6 +578,82 @@ function animate(currentTime) {
         const targetRoll = moveState.left ? Math.PI / 5 : moveState.right ? -Math.PI / 5 : 0;
         tiltGroup.rotation.z += (targetRoll  - tiltGroup.rotation.z) * delta * 4.0;
         tiltGroup.rotation.x += (targetPitch - tiltGroup.rotation.x) * delta * 4.0;
+
+        // ── WORLD PROPS: treadmill + bob + sparkles ───────────────────────
+        // Camera flies in -Z direction (birdGroup.translateZ(-50)).
+        // "Behind" the camera means a LARGER Z value than the camera.
+        // A prop is recycled when it is more than RECYCLE_BEHIND units
+        // behind (prop.z > camera.z + RECYCLE_BEHIND), then placed
+        // SPAWN_RANGE_Z units ahead (prop.z = camera.z - SPAWN_RANGE_Z).
+        let nearestPropDistSq = Infinity;
+        propPool.forEach(prop => {
+            const m = prop.mesh;
+
+            // ── TREADMILL ─────────────────────────────────────────────────
+            if (m.position.z > camera.position.z + RECYCLE_BEHIND) {
+                m.position.x = (Math.random() - 0.5) * SPAWN_RANGE_X * 2;
+                m.position.z = camera.position.z - SPAWN_RANGE_Z - Math.random() * 500;
+                // Reset Y to yBase; bob will animate on top
+                m.position.y = prop.yBase;
+                // Re-randomise yaw on recycle so it never looks like the same boat
+                m.rotation.set(0, Math.random() * Math.PI * 2, 0);
+            }
+
+            // ── BOB — only Y changes, X/Z/rotation never touched ─────────
+            // yBase sinks the model partially below water surface.
+            // getBobOffset adds a slow ±1.5 unit sine so it feels alive.
+            m.position.y = prop.yBase + getBobOffset(prop.bobPhase, t);
+
+            // ── SPARKLES ──────────────────────────────────────────────────
+            if (prop.sparklePoints) {
+                const pos = prop.sparklePoints.geometry.attributes.position;
+                for (let si = 0; si < SPARKLE_COUNT; si++) {
+                    pos.setY(si, (pos.getY(si) + delta * 1.2) % 5.0);
+                    pos.setX(si, pos.getX(si) + Math.sin(t * 1.5 + sparklePhases[si]) * 0.005);
+                }
+                pos.needsUpdate = true;
+                sparkleMat.opacity = 0.55 + Math.sin(t * 3.0) * 0.2;
+            }
+
+            // ── PROXIMITY CHECK ───────────────────────────────────────────
+            const dx = m.position.x - birdGroup.position.x;
+            const dz = m.position.z - birdGroup.position.z;
+            const dSq = dx * dx + dz * dz;
+            if (dSq < nearestPropDistSq) nearestPropDistSq = dSq;
+        });
+
+        // ── PROXIMITY SCATTER ─────────────────────────────────────────────
+        // When the bird flies close to any prop, wingmen briefly break
+        // formation and drift outward before snapping back.
+        scatterCooldown = Math.max(0, scatterCooldown - delta);
+        const SCATTER_R_SQ = SCATTER_RADIUS * SCATTER_RADIUS;
+
+        if (nearestPropDistSq < SCATTER_R_SQ && !isScattering && scatterCooldown === 0) {
+            isScattering = true;
+            // Assign each wingman a random outward scatter target
+            scatterTargets.forEach((sv, i) => {
+                const side = (i % 2 === 0) ? -1 : 1;
+                sv.set(side * (8 + Math.random() * 12), Math.random() * 5, Math.random() * 8);
+            });
+        }
+        if (nearestPropDistSq > SCATTER_R_SQ * 1.5 && isScattering) {
+            isScattering = false;
+            scatterCooldown = 3.0;
+            scatterTargets.forEach(sv => sv.set(0, 0, 0));
+        }
+
+        // Apply scatter offsets to wingmen (indices 1-4 of allWrappers)
+        scatterCurrents.forEach((cur, i) => {
+            cur.lerp(scatterTargets[i], delta * 3.0);
+            const wrapper = allWrappers[i + 1];
+            if (wrapper) {
+                wrapper.position.set(
+                    WRAP_BASE.x + V_OFFSETS[i + 1].x + cur.x,
+                    WRAP_BASE.y + V_OFFSETS[i + 1].y + cur.y,
+                    WRAP_BASE.z + V_OFFSETS[i + 1].z + cur.z
+                );
+            }
+        });
 
         // ── CAMERA ────────────────────────────────────────────────────────
         if (birdWrapper) {
