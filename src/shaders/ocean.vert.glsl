@@ -3,7 +3,7 @@ varying vec2 vUv;
 varying vec3 vWorldPosition;
 varying vec3 vNormal;
 varying float vChoppiness;
-varying float vElevation; // NEW: Tracks wave height for transparency
+varying float vElevation;
 
 float hash(float n) { return fract(sin(n) * 43758.5453123); }
 const float GOLDEN_RATIO = 1.61803398875;
@@ -13,8 +13,6 @@ vec3 gerstnerWave(float angle, float steepness, float wavelength, float speed, v
     float c = sqrt(9.8 / k) * speed;
     vec2 d = vec2(cos(angle), sin(angle));
     
-    // We use the warped spatial coordinates to calculate the phase, 
-    // bending the infinite ridges into unpredictable, broken swells.
     float phase = k * (dot(d, warpedP) - c * uTime) + hash(angle) * 6.28;
     float a = steepness / k;
 
@@ -44,9 +42,6 @@ void main() {
     vec3 binormal = vec3(0.0, 0.0, 1.0);
     float choppiness = 0.0;
 
-    // --- SPATIAL DOMAIN WARPING ---
-    // This violently distorts the X/Z grid before the waves are even calculated.
-    // It completely shatters the "quilted" patterned look.
     vec2 warpedP = position.xz;
     warpedP.x += sin(position.z * 0.02 + uTime * 0.1) * 20.0;
     warpedP.y += cos(position.x * 0.02 - uTime * 0.1) * 20.0;
@@ -66,7 +61,7 @@ void main() {
     }
 
     vChoppiness = choppiness;
-    vElevation = p.y; // Send the final vertical height to the fragment shader
+    vElevation = p.y;
     vNormal = normalize(cross(binormal, tangent));
 
     vec4 worldPosition = modelMatrix * vec4(p, 1.0);

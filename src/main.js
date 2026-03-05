@@ -19,18 +19,36 @@ import sprayFrag from './shaders/spray.frag.glsl?raw';
 const scene  = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 20000);
 
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(window.devicePixelRatio);
+// ─────────────────────────────────────────────
+// MOBILE DETECTION — drives every quality branch below
+// ─────────────────────────────────────────────
+const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+              || (navigator.maxTouchPoints > 1 && window.innerWidth < 1024);
+
+const renderer = new THREE.WebGLRenderer({ antialias: !isMobile, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, isMobile ? 1.5 : 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
+
+renderer.shadowMap.enabled = !isMobile;   // shadows off on mobile — big GPU win
+renderer.shadowMap.type    = THREE.PCFShadowMap;
 document.getElementById('app').appendChild(renderer.domElement);
 
 // ─────────────────────────────────────────────
 // 2. OCEAN
 // ─────────────────────────────────────────────
+// Mobile: replace the 16-iteration Gerstner loop with an 8-iteration version.
+// This is the single biggest GPU saving — halves the vertex shader cost.
+const oceanVertSrc = isMobile
+    ? oceanVert.replace('i < 16', 'i < 8').replace('i < 4', 'i < 2')  // fewer waves + fewer capillary
+    : oceanVert;
+const oceanFragSrc = isMobile
+    ? oceanFrag.replace('i < 4', 'i < 2')   // fewer capillary noise octaves in frag
+    : oceanFrag;
+
 const customOceanMaterial = new THREE.ShaderMaterial({
-    vertexShader: oceanVert,
-    fragmentShader: oceanFrag,
+    vertexShader: oceanVertSrc,
+    fragmentShader: oceanFragSrc,
     uniforms: {
         uTime:           { value: 0 },
         uSunPosition:    { value: new THREE.Vector3(100, 50, -100).normalize() },
@@ -40,12 +58,15 @@ const customOceanMaterial = new THREE.ShaderMaterial({
     }
 });
 
-const geometry = new THREE.PlaneGeometry(10000, 10000, 1024, 1024);
+// Mobile: 256×256 mesh (16× fewer vertices than desktop 1024×1024)
+const oceanRes = isMobile ? 256 : 1024;
+const geometry = new THREE.PlaneGeometry(10000, 10000, oceanRes, oceanRes);
 geometry.rotateX(-Math.PI / 2);
 const oceans = [];
 for (let i = 0; i < 3; i++) {
     const o = new THREE.Mesh(geometry, customOceanMaterial);
-    o.position.z = -i * 10000;
+    o.position.z  = -i * 10000;
+    o.receiveShadow = true;   // ocean receives shadows cast by boats/props
     scene.add(o);
     oceans.push(o);
 }
@@ -53,7 +74,7 @@ for (let i = 0; i < 3; i++) {
 // ─────────────────────────────────────────────
 // 3. SPRAY
 // ─────────────────────────────────────────────
-const particleCount = 250000;
+const particleCount = isMobile ? 15000 : 60000;
 const sprayGeo = new THREE.BufferGeometry();
 const posArr   = new Float32Array(particleCount * 3);
 const randArr  = new Float32Array(particleCount);
@@ -148,7 +169,23 @@ gltfLoader.load('/bird.glb', (gltf) => {
 
     // ── LEAD BIRD ─────────────────────────────────────────────────────────
     birdModel            = gltf.scene;
-    birdModel.rotation.y = Math.PI;   // face away from camera
+    birdModel.rotation.y = Math.PI;
+
+    // Anisotropic filtering + HDRI env map + shadow casting on bird
+    const maxAniso = renderer.capabilities.getMaxAnisotropy();
+    birdModel.traverse(child => {
+        if (child.isMesh && child.material) {
+            child.castShadow = true;
+            const mats = Array.isArray(child.material) ? child.material : [child.material];
+            mats.forEach(mat => {
+                ['map','normalMap','roughnessMap','metalnessMap','aoMap','emissiveMap'].forEach(key => {
+                    if (mat[key]) { mat[key].anisotropy = maxAniso; mat[key].needsUpdate = true; }
+                });
+                if (mat.envMapIntensity !== undefined) mat.envMapIntensity = 1.0;
+                mat.needsUpdate = true;
+            });
+        }
+    });
 
     birdWrapper = new THREE.Group();
     birdWrapper.position.copy(WRAP_BASE);
@@ -223,26 +260,141 @@ function getBobOffset(phase, t) {
 
 // ── Pool configuration ─────────────────────────────────────────────────────
 const PROP_DISTRIBUTION = [
-    { file: 'boat_1',         count: 3, scale: 1.0,  yBase: -2.5 },
-    { file: 'boat_2',         count: 3, scale: 1.0,  yBase: -2.5 },
+    { file: 'boat_1',         count: 3, scale: 0.8,  yBase: -5.0 },
+    { file: 'boat_2',         count: 3, scale: 0.8,  yBase: -5.0 },
     { file: 'barrel',         count: 4, scale: 1.2,  yBase: -0.6 },
     { file: 'crate',          count: 4, scale: 1.0,  yBase: -0.5 },
     { file: 'treasure_chest', count: 4, scale: 0.9,  yBase: -0.5 },
 ];
-const POOL_SIZE     = PROP_DISTRIBUTION.reduce((s, d) => s + d.count, 0);
-const SPAWN_RANGE_X = 2500;
-const SPAWN_RANGE_Z = 5000;
-// Recycle when prop is more than 2000 units BEHIND the camera's Z
-// (camera flies in -Z, so "behind" = prop.z > camera.z + 2000)
-const RECYCLE_BEHIND = 2000;
 
-// Each entry: { mesh, type, bobPhase, rotSpeed }
-const propPool        = [];
-const loadedTemplates = {};
-let   propsLoaded     = 0;
-const TOTAL_PROP_TYPES = PROP_DISTRIBUTION.length;
+// Props recycle when they drift more than this distance from the bird in XZ.
+// They are then placed at a random position in a ring just outside SPAWN_MIN_DIST,
+// distributed in all directions so turning around reveals objects everywhere.
+const SPAWN_MIN_DIST  = 400;    // inner dead-zone (not right on top of bird)
+const SPAWN_MAX_DIST  = 3000;   // how far out props are placed on recycle
+const RECYCLE_DIST    = 3200;   // recycle when farther than this from bird
 
-// ── Golden particle geometry (shared across all chest instances) ────────────
+const propPool = [];
+
+// Returns a random world position in a ring around the bird,
+// spread in all directions (full 360°) so the ocean looks populated
+// even when the player turns around.
+function randomPropPosition() {
+    const angle = Math.random() * Math.PI * 2;
+    const dist  = SPAWN_MIN_DIST + Math.random() * (SPAWN_MAX_DIST - SPAWN_MIN_DIST);
+    return {
+        x: birdGroup.position.x + Math.cos(angle) * dist,
+        z: birdGroup.position.z + Math.sin(angle) * dist,
+    };
+}
+
+// ── CHEST GLOW SPRITE ──────────────────────────────────────────────────────
+// Canvas-generated radial gradient texture: golden at centre, fully
+// transparent at edges. AdditiveBlending means it only adds light —
+// it never darkens anything — giving a natural bloom-like glow.
+const glowCanvas  = document.createElement('canvas');
+glowCanvas.width  = 128;
+glowCanvas.height = 128;
+const glowCtx     = glowCanvas.getContext('2d');
+const glowGrad    = glowCtx.createRadialGradient(64, 64, 0, 64, 64, 64);
+glowGrad.addColorStop(0.0, 'rgba(255, 200,  50, 0.55)');  // warm gold, semi-opaque core
+glowGrad.addColorStop(0.3, 'rgba(255, 160,  20, 0.25)');  // fade to amber
+glowGrad.addColorStop(1.0, 'rgba(255, 120,   0, 0.00)');  // fully transparent edge
+glowCtx.fillStyle = glowGrad;
+glowCtx.fillRect(0, 0, 128, 128);
+
+const glowTex = new THREE.CanvasTexture(glowCanvas);
+const glowMat = new THREE.SpriteMaterial({
+    map:      glowTex,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    transparent: true,
+});
+const glowSprite = new THREE.Sprite(glowMat);
+glowSprite.scale.set(6, 4, 1);     // wide oval — wider than tall to hug the chest top
+glowSprite.position.set(0, 2.2, 0); // float just above the lid
+
+// ── Loader — spawns each type's instances immediately as it loads ──────────
+// This means if one model fails/is slow, the rest still appear.
+PROP_DISTRIBUTION.forEach(typeDef => {
+    gltfLoader.load(`/${typeDef.file}.glb`, (gltf) => {
+        const template = gltf.scene;
+        template.scale.setScalar(typeDef.scale);
+
+        // Anisotropic filtering eliminates the blurry/shimmering textures
+        // seen at oblique angles — the max value the GPU supports is used.
+        const maxAnisotropy = renderer.capabilities.getMaxAnisotropy();
+        template.traverse(child => {
+            if (child.isMesh && child.material) {
+                // Shadows
+                child.castShadow    = true;
+                child.receiveShadow = true;
+
+                const mats = Array.isArray(child.material) ? child.material : [child.material];
+                mats.forEach(mat => {
+                    // Anisotropic filtering on all texture maps
+                    ['map','normalMap','roughnessMap','metalnessMap','aoMap','emissiveMap'].forEach(key => {
+                        if (mat[key]) {
+                            mat[key].anisotropy = maxAnisotropy;
+                            mat[key].needsUpdate = true;
+                        }
+                    });
+                    // HDRI environment intensity — controls how strongly the
+                    // skybox HDRI affects reflections and diffuse IBL on this material.
+                    // 1.0 is physically correct; we nudge slightly above so props
+                    // read clearly against the dark ocean in all lighting conditions.
+                    if (mat.envMapIntensity !== undefined) mat.envMapIntensity = 1.0;
+                    mat.needsUpdate = true;
+                });
+            }
+        });
+
+        for (let n = 0; n < typeDef.count; n++) {
+            const mesh = template.clone(true);
+
+            // Place in a full ring around starting position
+            const pos = randomPropPosition();
+            mesh.position.set(pos.x, typeDef.yBase, pos.z);
+            mesh.rotation.set(0, Math.random() * Math.PI * 2, 0);
+            scene.add(mesh);
+
+            let sparklePoints = null;
+            let chestGlow     = null;
+            if (typeDef.file === 'treasure_chest') {
+                const geo = sparkleGeo.clone();
+                sparklePoints = new THREE.Points(geo, sparkleMat);
+                sparklePoints.position.y = 1.5;
+                mesh.add(sparklePoints);
+
+                // ── VISIBLE GLOW SPRITE ────────────────────────────────────
+                // A canvas-drawn radial gradient gives a soft organic glow
+                // that looks like warm light pooling above the coin hoard.
+                // Sprites always face the camera, so it reads correctly from
+                // any angle the player flies past.
+                mesh.add(glowSprite.clone());
+
+                // ── POINT LIGHT ───────────────────────────────────────────
+                // Spills golden light onto the ocean surface and the chest
+                // itself. Kept faint (0.5) so it reads as ambience not a torch.
+                // PointLight skipped on mobile — PointLights are expensive draw calls
+                if (!isMobile) {
+                    chestGlow = new THREE.PointLight(0xffaa00, 0.5, 20, 2);
+                    chestGlow.position.set(0, 2.0, 0);
+                    mesh.add(chestGlow);
+                }
+            }
+
+            propPool.push({
+                mesh,
+                type:     typeDef.file,
+                yBase:    typeDef.yBase,
+                bobPhase: Math.random() * Math.PI * 2,
+                sparklePoints,
+                chestGlow,
+            });
+        }
+    });
+});
 const SPARKLE_COUNT  = 40;
 const sparkleGeo     = new THREE.BufferGeometry();
 const sparklePos     = new Float32Array(SPARKLE_COUNT * 3);
@@ -274,66 +426,33 @@ const scatterCurrents = Array.from({ length: 4 }, () => new THREE.Vector3());
 let   isScattering    = false;
 let   scatterCooldown = 0;   // seconds before allowing re-scatter
 
-// ── Loader ────────────────────────────────────────────────────────────────
-function onPropTypeLoaded(typeDef, gltf) {
-    const template = gltf.scene;
-    // Uniform scale from config
-    template.scale.setScalar(typeDef.scale);
-    // Prevent textures from being garbage-collected after first clone
-    template.traverse(c => { if (c.isMesh) c.castShadow = false; });
-    loadedTemplates[typeDef.file] = template;
-
-    propsLoaded++;
-    if (propsLoaded === TOTAL_PROP_TYPES) buildPropPool();
-}
-
-PROP_DISTRIBUTION.forEach(typeDef => {
-    gltfLoader.load(`/${typeDef.file}.glb`, (gltf) => onPropTypeLoaded(typeDef, gltf));
-});
-
-// ── Build pool once all templates are ready ────────────────────────────────
-function buildPropPool() {
-    PROP_DISTRIBUTION.forEach(typeDef => {
-        const template = loadedTemplates[typeDef.file];
-        for (let n = 0; n < typeDef.count; n++) {
-            const mesh = template.clone(true);
-
-            const wx = (Math.random() - 0.5) * SPAWN_RANGE_X * 2;
-            const wz = -Math.random() * SPAWN_RANGE_Z;
-            // Y = yBase so boat sits partially submerged; bob animates on top
-            mesh.position.set(wx, typeDef.yBase, wz);
-            // Fixed random yaw set ONCE — never changed again
-            mesh.rotation.set(0, Math.random() * Math.PI * 2, 0);
-            scene.add(mesh);
-
-            let sparklePoints = null;
-            if (typeDef.file === 'treasure_chest') {
-                const geo = sparkleGeo.clone();
-                sparklePoints = new THREE.Points(geo, sparkleMat);
-                sparklePoints.position.y = 1.5;
-                mesh.add(sparklePoints);
-            }
-
-            propPool.push({
-                mesh,
-                type:        typeDef.file,
-                yBase:       typeDef.yBase,
-                bobPhase:    Math.random() * Math.PI * 2,
-                sparklePoints,
-            });
-        }
-    });
-}
+// ── Loader — defined above inline per type ─────────────────────────────────
 
 // ─────────────────────────────────────────────
-// 6. POST-PROCESSING
+// 6. POST-PROCESSING  (with MSAA × 8 to fix aliasing)
+//
+// WHY: EffectComposer renders to an internal WebGLRenderTarget, which
+// completely bypasses the renderer's own antialias flag (that flag only
+// applies to the final canvas blit, which the composer never does).
+// Supplying a WebGLRenderTarget with `samples: 8` gives us hardware MSAA
+// through the full post-processing chain — bloom included.
 // ─────────────────────────────────────────────
+const msaaTarget = new THREE.WebGLRenderTarget(
+    window.innerWidth,
+    window.innerHeight,
+    {
+        samples:    isMobile ? 1 : 4,        // no MSAA on mobile — huge fillrate saving
+        type:       THREE.HalfFloatType,
+        colorSpace: renderer.outputColorSpace,
+    }
+);
+
 const bloomPass = new UnrealBloomPass(
     new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85
 );
 bloomPass.threshold = 0.99;
 bloomPass.radius    = 0.05;
-const composer = new EffectComposer(renderer);
+const composer = new EffectComposer(renderer, msaaTarget);  // ← pass MSAA target here
 composer.addPass(new RenderPass(scene, camera));
 composer.addPass(bloomPass);
 composer.addPass(new OutputPass());
@@ -376,9 +495,36 @@ hdrLoader.load(`skybox_${currentSkyboxIndex}.hdr`, (tex) => {
 // ─────────────────────────────────────────────
 // 8. LIGHTING
 // ─────────────────────────────────────────────
-const sunLight = new THREE.DirectionalLight(0xffffff, 3.0);
+
+// HemisphereLight provides sky/ground ambient fill so model undersides
+// are never pitch-black — matches what the HDRI environment suggests.
+// Sky colour matches a mid-blue sky; ground colour matches dark ocean.
+// Intensity kept low (0.6) so it doesn't wash out the directional shadow.
+const hemiLight = new THREE.HemisphereLight(0x8ab0d0, 0x0d1a24, 0.6);
+scene.add(hemiLight);
+
+// Directional sun — intensity reduced from 3.0 → 1.8 now that the HDRI
+// environment provides IBL diffuse + specular on PBR model materials.
+// 3.0 was overexposing models and making them look unnatural vs the ocean.
+const sunLight = new THREE.DirectionalLight(0xfff5e0, 1.8);
 sunLight.position.copy(customOceanMaterial.uniforms.uSunPosition.value).multiplyScalar(100);
+
+// Shadow camera frustum widened to ±600 so it covers nearby props even
+// when the bird is flying fast and props are spread across a large area.
+// 4096 shadow map gives sharper shadow edges on the ocean surface.
+sunLight.castShadow              = !isMobile;
+sunLight.shadow.mapSize.width    = isMobile ? 1024 : 4096;
+sunLight.shadow.mapSize.height   = isMobile ? 1024 : 4096;
+sunLight.shadow.camera.near      = 1;
+sunLight.shadow.camera.far       = 1000;
+sunLight.shadow.camera.left      = -600;
+sunLight.shadow.camera.right     =  600;
+sunLight.shadow.camera.top       =  600;
+sunLight.shadow.camera.bottom    = -600;
+sunLight.shadow.bias             = -0.0005;
+sunLight.shadow.normalBias       =  0.02;
 scene.add(sunLight);
+scene.add(sunLight.target);   // target must be in scene for updateMatrixWorld to work
 
 // ─────────────────────────────────────────────
 // 9. AUDIO
@@ -409,6 +555,13 @@ document.getElementById('instructions').addEventListener('click', () => {
 const moveState = { forward: false, backward: false, left: false, right: false };
 const _worldY   = new THREE.Vector3(0, 1, 0);
 
+function toggleFormation() {
+    isFormation = !isFormation;
+    for (let i = 1; i < allWrappers.length; i++) {
+        if (allWrappers[i]) allWrappers[i].visible = isFormation;
+    }
+}
+
 document.addEventListener('keydown', (e) => {
     if (e.code === 'Escape') { isSimulating = false; blocker.style.display = 'flex'; return; }
     switch (e.code) {
@@ -418,13 +571,7 @@ document.addEventListener('keydown', (e) => {
         case 'KeyD': moveState.right    = true;  break;
         case 'KeyQ': switchSkybox(-1);           break;
         case 'KeyE': switchSkybox(1);            break;
-        case 'Space':
-            e.preventDefault();
-            isFormation = !isFormation;
-            for (let i = 1; i < allWrappers.length; i++) {
-                if (allWrappers[i]) allWrappers[i].visible = isFormation;
-            }
-            break;
+        case 'Space': e.preventDefault(); toggleFormation(); break;
     }
 });
 document.addEventListener('keyup', (e) => {
@@ -449,11 +596,19 @@ const setupBtn = (id, action) => {
 setupBtn('btn-forward', 'forward'); setupBtn('btn-backward', 'backward');
 setupBtn('btn-left', 'left');       setupBtn('btn-right', 'right');
 
+// Formation toggle button (mobile only — bottom-right)
+const btnFormation = document.getElementById('btn-formation');
+if (btnFormation) {
+    btnFormation.addEventListener('touchstart', (e) => { e.preventDefault(); toggleFormation(); });
+    btnFormation.addEventListener('mousedown',  ()  => { toggleFormation(); });
+}
+
 window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
     composer.setSize(window.innerWidth, window.innerHeight);
+    msaaTarget.setSize(window.innerWidth, window.innerHeight);
 });
 
 // ─────────────────────────────────────────────
@@ -558,12 +713,19 @@ function animate(currentTime) {
         if (moveState.forward)  birdGroup.position.y += 35.0 * delta;
         if (moveState.backward) birdGroup.position.y -= 35.0 * delta;
 
-        // A/D → yaw on world Y (altitude 100% unaffected)
-        if (moveState.left)  birdGroup.rotateOnWorldAxis(_worldY,  1.0 * delta);
-        if (moveState.right) birdGroup.rotateOnWorldAxis(_worldY, -1.0 * delta);
-
         // Continuous forward flight
         birdGroup.translateZ(-50.0 * delta);
+
+        // COORDINATED BANK TURN: A/D set the roll target on tiltGroup.
+        // The roll angle then drives yaw automatically — exactly like real
+        // aircraft banking into a turn. No direct yaw on keypress means the
+        // bird never jumps to a corner of the screen; it tilts first, then
+        // smoothly arcs. The turn rate is proportional to the current roll.
+        const targetRoll = moveState.left ? Math.PI / 5 : moveState.right ? -Math.PI / 5 : 0;
+        tiltGroup.rotation.z += (targetRoll - tiltGroup.rotation.z) * delta * 4.0;
+        // tiltGroup.rotation.z: positive = rolled left, negative = rolled right.
+        // Negate it: rolled left → yaw left (negative world-Y rotation in Three.js = left turn)
+        birdGroup.rotateOnWorldAxis(_worldY, tiltGroup.rotation.z * 0.55 * delta);
 
         // Pitch target
         let targetPitch = 0;
@@ -574,37 +736,36 @@ function animate(currentTime) {
         if (birdGroup.position.y <= 22.0)  { birdGroup.position.y = 22.0;  if (targetPitch < 0) targetPitch = 0; }
         if (birdGroup.position.y >= 220.0) { birdGroup.position.y = 220.0; if (targetPitch > 0) targetPitch = 0; }
 
-        // Roll: A → anticlockwise (+Z), D → clockwise (-Z)
-        const targetRoll = moveState.left ? Math.PI / 5 : moveState.right ? -Math.PI / 5 : 0;
-        tiltGroup.rotation.z += (targetRoll  - tiltGroup.rotation.z) * delta * 4.0;
         tiltGroup.rotation.x += (targetPitch - tiltGroup.rotation.x) * delta * 4.0;
 
-        // ── WORLD PROPS: treadmill + bob + sparkles ───────────────────────
-        // Camera flies in -Z direction (birdGroup.translateZ(-50)).
-        // "Behind" the camera means a LARGER Z value than the camera.
-        // A prop is recycled when it is more than RECYCLE_BEHIND units
-        // behind (prop.z > camera.z + RECYCLE_BEHIND), then placed
-        // SPAWN_RANGE_Z units ahead (prop.z = camera.z - SPAWN_RANGE_Z).
+        // ── WORLD PROPS: treadmill (all directions) + bob + sparkles ─────
+        // Distance check is in XZ from birdGroup (not camera Z) so the
+        // treadmill works in every direction — turning around still shows
+        // objects because recycled props are placed in a full 360° ring.
         let nearestPropDistSq = Infinity;
+        // Also track closest BOAT for avoidance — barrels/crates/chests excluded
+        let avoidPropPos = null;
+        let avoidDistSq  = Infinity;
+        const AVOIDANCE_RADIUS = 55;    // only triggers when genuinely close to a boat
+        const AVOIDANCE_R_SQ   = AVOIDANCE_RADIUS * AVOIDANCE_RADIUS;
+
         propPool.forEach(prop => {
-            const m = prop.mesh;
+            const m  = prop.mesh;
+            const dx = m.position.x - birdGroup.position.x;
+            const dz = m.position.z - birdGroup.position.z;
+            const dSq = dx * dx + dz * dz;
 
             // ── TREADMILL ─────────────────────────────────────────────────
-            if (m.position.z > camera.position.z + RECYCLE_BEHIND) {
-                m.position.x = (Math.random() - 0.5) * SPAWN_RANGE_X * 2;
-                m.position.z = camera.position.z - SPAWN_RANGE_Z - Math.random() * 500;
-                // Reset Y to yBase; bob will animate on top
-                m.position.y = prop.yBase;
-                // Re-randomise yaw on recycle so it never looks like the same boat
+            if (dSq > RECYCLE_DIST * RECYCLE_DIST) {
+                const pos = randomPropPosition();
+                m.position.set(pos.x, prop.yBase, pos.z);
                 m.rotation.set(0, Math.random() * Math.PI * 2, 0);
             }
 
-            // ── BOB — only Y changes, X/Z/rotation never touched ─────────
-            // yBase sinks the model partially below water surface.
-            // getBobOffset adds a slow ±1.5 unit sine so it feels alive.
+            // ── BOB ───────────────────────────────────────────────────────
             m.position.y = prop.yBase + getBobOffset(prop.bobPhase, t);
 
-            // ── SPARKLES ──────────────────────────────────────────────────
+            // ── SPARKLES + CHEST GLOW ─────────────────────────────────────
             if (prop.sparklePoints) {
                 const pos = prop.sparklePoints.geometry.attributes.position;
                 for (let si = 0; si < SPARKLE_COUNT; si++) {
@@ -614,13 +775,50 @@ function animate(currentTime) {
                 pos.needsUpdate = true;
                 sparkleMat.opacity = 0.55 + Math.sin(t * 3.0) * 0.2;
             }
+            // Pulse PointLight + glow sprite together — slow drift with a
+            // faster high-frequency shimmer layered on top (firelight feel).
+            if (prop.chestGlow) {
+                const pulse = 0.45 + Math.sin(t * 2.3 + prop.bobPhase) * 0.15
+                                   + Math.sin(t * 5.7 + prop.bobPhase * 1.3) * 0.05;
+                prop.chestGlow.intensity = pulse;
+                // The glow sprite shares the same pulse so they feel unified.
+                // SpriteMaterial opacity is per-material and shared across all
+                // clones — each chest has its own cloned Sprite, but they all
+                // share glowMat. We animate via the sprite's scale X instead,
+                // giving each chest a subtly breathing feel independently.
+                const sprite = m.children.find(c => c.isSprite);
+                if (sprite) sprite.scale.set(6 + pulse * 1.5, 4 + pulse, 1);
+            }
 
-            // ── PROXIMITY CHECK ───────────────────────────────────────────
-            const dx = m.position.x - birdGroup.position.x;
-            const dz = m.position.z - birdGroup.position.z;
-            const dSq = dx * dx + dz * dz;
+            // ── CLOSEST PROP TRACKING (scatter uses all types; avoidance boats only) ──
             if (dSq < nearestPropDistSq) nearestPropDistSq = dSq;
+            const isBoat = prop.type === 'boat_1' || prop.type === 'boat_2';
+            if (isBoat && dSq < avoidDistSq) { avoidDistSq = dSq; avoidPropPos = m.position; }
         });
+
+        // ── COLLISION AVOIDANCE ───────────────────────────────────────────
+        // If a prop is within AVOIDANCE_RADIUS of the bird, compute the
+        // avoidance direction in birdGroup LOCAL space.
+        // Only steer if the obstacle is roughly AHEAD (local Z < 0 = in front).
+        // The steer is a gentle yaw push away from the obstacle's local X side,
+        // and a gentle altitude push upward to clear it vertically.
+        if (avoidPropPos && avoidDistSq < AVOIDANCE_R_SQ) {
+            // Transform prop world position into birdGroup local space
+            const localProp = birdGroup.worldToLocal(avoidPropPos.clone());
+
+            // Only react if obstacle is ahead (negative local Z = in front of bird)
+            if (localProp.z < 30) {
+                const avoidStrength = 1.0 - (Math.sqrt(avoidDistSq) / AVOIDANCE_RADIUS);
+
+                // Steer away: if prop is to the right (local X > 0) → yaw left, and vice versa
+                const yawDir = localProp.x > 0 ? 1 : -1;
+                birdGroup.rotateOnWorldAxis(_worldY, yawDir * avoidStrength * 1.8 * delta);
+
+                // Nudge altitude upward to clear the obstacle
+                birdGroup.position.y += avoidStrength * 25.0 * delta;
+                birdGroup.position.y = Math.min(birdGroup.position.y, 220.0);
+            }
+        }
 
         // ── PROXIMITY SCATTER ─────────────────────────────────────────────
         // When the bird flies close to any prop, wingmen briefly break
@@ -654,6 +852,17 @@ function animate(currentTime) {
                 );
             }
         });
+
+        // Keep directional light (and its shadow camera) centred on the bird.
+        // Without this the fixed shadow frustum would quickly slide off-screen
+        // as the bird flies, and all prop shadows would vanish.
+        sunLight.position.set(
+            birdGroup.position.x + customOceanMaterial.uniforms.uSunPosition.value.x * 100,
+            customOceanMaterial.uniforms.uSunPosition.value.y * 100,
+            birdGroup.position.z + customOceanMaterial.uniforms.uSunPosition.value.z * 100
+        );
+        sunLight.target.position.copy(birdGroup.position);
+        sunLight.target.updateMatrixWorld();
 
         // ── CAMERA ────────────────────────────────────────────────────────
         if (birdWrapper) {
