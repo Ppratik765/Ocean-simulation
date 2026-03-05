@@ -20,7 +20,9 @@ const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
               || (navigator.maxTouchPoints > 1 && window.innerWidth < 1024);
 
 const renderer = new THREE.WebGLRenderer({ antialias: !isMobile, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, isMobile ? 1.5 : 2));
+// Pixel ratio: capped at 1.5 on desktop (Retina renders at 2.25× pixels vs 1×,
+// virtually indistinguishable but costs 2.25× fillrate), 1.0 on mobile.
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, isMobile ? 1.0 : 1.5));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.shadowMap.enabled = !isMobile;
@@ -28,10 +30,19 @@ renderer.shadowMap.type    = THREE.PCFShadowMap;
 document.getElementById('app').appendChild(renderer.domElement);
 
 // ─── OCEAN ───────────────────────────────────────────────────────────────────
+// Ocean: desktop 16→12 iterations. Iterations 13-16 produce wavelengths shorter
+// than the mesh tessellation (~10 units/segment at 1024 res) — the geometry
+// literally cannot represent them, so they're pure shader waste.
+// Mobile already patched to 8 via string replace below.
+// Spray: 16→4 everywhere. Spray particles need approximate wave height only —
+// 4 iterations is indistinguishable visually and saves ~960K Gerstner evals/frame.
 const oceanVertSrc = isMobile
-    ? oceanVert.replace('i < 16', 'i < 8').replace('i < 4', 'i < 2') : oceanVert;
+    ? oceanVert.replace('i < 16', 'i < 8').replace('i < 4', 'i < 2')
+    : oceanVert.replace('i < 16', 'i < 12');
 const oceanFragSrc = isMobile
-    ? oceanFrag.replace('i < 4', 'i < 2') : oceanFrag;
+    ? oceanFrag.replace('i < 4', 'i < 2')
+    : oceanFrag;
+const sprayVertSrc = sprayVert.replace('i < 16', 'i < 4');   // spray: 16→4 on all devices
 
 const customOceanMaterial = new THREE.ShaderMaterial({
     vertexShader: oceanVertSrc, fragmentShader: oceanFragSrc,
@@ -44,9 +55,9 @@ const customOceanMaterial = new THREE.ShaderMaterial({
     }
 });
 
-const oceanRes  = isMobile ? 512  : 1024;
-const GRID_DIM  = isMobile ? 2    : 3;
-const GRID_HALF = (GRID_DIM - 1) / 2;
+const oceanRes  = isMobile ? 384  : 1024;
+const GRID_DIM  = 3;
+const GRID_HALF = 1;
 const TILE_SIZE = 10000;
 const geometry  = new THREE.PlaneGeometry(10000, 10000, oceanRes, oceanRes);
 geometry.rotateX(-Math.PI / 2);
@@ -79,7 +90,7 @@ sprayGeo.setAttribute('position',  new THREE.BufferAttribute(posArr,  3));
 sprayGeo.setAttribute('aRandom',   new THREE.BufferAttribute(randArr, 1));
 sprayGeo.setAttribute('aVelocity', new THREE.BufferAttribute(velArr,  3));
 const sprayMaterial = new THREE.ShaderMaterial({
-    vertexShader: sprayVert, fragmentShader: sprayFrag,
+    vertexShader: sprayVertSrc, fragmentShader: sprayFrag,
     uniforms: {
         uTime:           { value: 0 },
         uWaterColor:     { value: new THREE.Color(0x1a2b3c) },
@@ -160,11 +171,11 @@ gltfLoader.load('/bird.glb', (gltf) => {
 function getBobOffset(phase, t) { return Math.sin(t * 0.4 + phase) * 1.5; }
 
 const PROP_DISTRIBUTION = [
-    { file: 'boat_1',         count: 2, scale: 0.6,  yBase: -6.0 },
-    { file: 'boat_2',         count: 3, scale: 0.6,  yBase: -6.0 },
-    { file: 'barrel',         count: 4, scale: 1.6,  yBase: -1.6 },
+    { file: 'boat_1',         count: 3, scale: 0.8,  yBase: -5.0 },
+    { file: 'boat_2',         count: 3, scale: 0.8,  yBase: -5.0 },
+    { file: 'barrel',         count: 4, scale: 1.2,  yBase: -0.6 },
     { file: 'crate',          count: 4, scale: 1.0,  yBase: -0.5 },
-    { file: 'treasure_chest', count: 4, scale: 1.2,  yBase: -1.5 },
+    { file: 'treasure_chest', count: 4, scale: 0.9,  yBase: -0.5 },
 ];
 const SPAWN_MIN_DIST = 400, SPAWN_MAX_DIST = 3000, RECYCLE_DIST = 3200;
 const propPool = [];
@@ -279,7 +290,9 @@ let   isScattering    = false, scatterCooldown = 0;
 
 // ─── POST-PROCESSING ──────────────────────────────────────────────────────────
 const msaaTarget = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
-    samples: isMobile ? 1 : 4, type: THREE.HalfFloatType, colorSpace: renderer.outputColorSpace
+    samples:    isMobile ? 1 : 2,   // ×2 visually identical to ×4 at half fillrate
+    type:       THREE.HalfFloatType,
+    colorSpace: renderer.outputColorSpace
 });
 const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
 bloomPass.threshold = 0.99; bloomPass.radius = 0.05;
@@ -333,7 +346,7 @@ scene.add(new THREE.HemisphereLight(0x8ab0d0, 0x0d1a24, 0.6));
 const sunLight = new THREE.DirectionalLight(0xfff5e0, 1.8);
 sunLight.position.copy(customOceanMaterial.uniforms.uSunPosition.value).multiplyScalar(100);
 sunLight.castShadow           = !isMobile;
-sunLight.shadow.mapSize.width = sunLight.shadow.mapSize.height = isMobile ? 1024 : 4096;
+sunLight.shadow.mapSize.width = sunLight.shadow.mapSize.height = isMobile ? 1024 : 2048;
 sunLight.shadow.camera.near   = 1;   sunLight.shadow.camera.far  = 1000;
 sunLight.shadow.camera.left   = -600; sunLight.shadow.camera.right = 600;
 sunLight.shadow.camera.top    =  600; sunLight.shadow.camera.bottom = -600;
@@ -394,7 +407,7 @@ function playSeagull() {
 }
 
 // [1] Wing flap — subliminal beat at animation flap rate
-const FLAP_PERIOD = 0.845;   
+const FLAP_PERIOD = 0.875;   // half of 1.75s — fires on each individual wingbeat
 let   flapTimer   = FLAP_PERIOD * 0.5;
 const flapSound   = new THREE.Audio(listener);
 let   flapBuf     = null;
@@ -514,9 +527,19 @@ function lockRootBones(model) {
 }
 
 // ─── RENDER LOOP ──────────────────────────────────────────────────────────────
-let lastTime = 0;
+// Hard cap at 60fps. On 120/144Hz displays rAF fires twice as often as needed,
+// doubling every GPU cost with zero visual benefit. This single change can
+// halve GPU load on high-refresh laptops and phones.
+const TARGET_FRAME_MS = 1000 / 60;
+let lastTime     = 0;
+let lastFrameTime = 0;
 function animate(currentTime) {
     requestAnimationFrame(animate);
+
+    // Skip this frame if we're ahead of the 60fps budget
+    if (currentTime - lastFrameTime < TARGET_FRAME_MS - 0.5) return;
+    lastFrameTime = currentTime;
+
     const t     = currentTime * 0.001;
     const delta = Math.min(lastTime === 0 ? 0 : t - lastTime, 0.05);
     lastTime = t;
