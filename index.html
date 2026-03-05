@@ -3,27 +3,148 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="/wave.png" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
     <title>Ocean Simulation</title>
     <link rel="stylesheet" href="/src/style.css">
+    <style>
+      /* ── DETECT TOUCH DEVICES by capability, not width ──────────────────
+         hover:none + pointer:coarse = touchscreen (phone/tablet).
+         This correctly shows controls on phones in ANY orientation —
+         portrait OR landscape — while hiding them on mouse desktops.        */
+
+      #mobile-controls,
+      #right-controls { display: none; }
+
+      @media (hover: none) and (pointer: coarse) {
+        /* ── LEFT: movement cluster ────────────────────────────────────── */
+        #mobile-controls {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          position: fixed;
+          bottom: 28px;
+          left: 18px;
+          z-index: 100;
+          gap: 6px;
+          opacity: 0.5;
+          transition: opacity 0.15s;
+        }
+
+        /* ── RIGHT: env + formation stacked ───────────────────────────── */
+        #right-controls {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          position: fixed;
+          bottom: 28px;
+          right: 18px;
+          z-index: 100;
+          gap: 6px;
+          opacity: 0.5;
+          transition: opacity 0.15s;
+        }
+
+        #mobile-controls:active,
+        #right-controls:active { opacity: 0.9; }
+
+        /* ── LANDSCAPE: tighter layout ─────────────────────────────────── */
+        @media (orientation: landscape) {
+          #mobile-controls  { bottom: 10px; left: 12px; gap: 4px; }
+          #right-controls   { bottom: 10px; right: 12px; gap: 4px; }
+          .ctrl-btn         { width: 48px !important; height: 48px !important; font-size: 18px !important; }
+          .ctrl-btn-tall    { height: 52px !important; }
+          .ctrl-btn .btn-label { font-size: 10px !important; }
+        }
+      }
+
+      /* ── SHARED BUTTON STYLE ─────────────────────────────────────────── */
+      .ctrl-btn {
+        width: 56px;
+        height: 56px;
+        background: rgba(0,0,0,0.5);
+        border: 1px solid rgba(255,255,255,0.22);
+        color: #fff;
+        border-radius: 12px;
+        font-size: 21px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        gap: 2px;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+        cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+        box-sizing: border-box;
+      }
+      .ctrl-btn-tall { height: 62px; }
+      .ctrl-btn .btn-icon  { font-size: 19px; line-height: 1; }
+      .ctrl-btn .btn-label { font-size: 11px; opacity: 0.8; line-height: 1; }
+      .ctrl-row { display: flex; gap: 6px; }
+    </style>
   </head>
   <body>
     <div id="blocker">
       <div id="instructions">
-        <p style="font-size:36px">Click to Simulate</p>
-        <p>WASD to move | Mouse to look | Environment: Q / E<br/></p>
-      </div>
-    </div>
-    <div id="app"></div>    
-    <div id="mobile-controls">
-      <button id="btn-forward">▲</button>
-      <div class="row">
-        <button id="btn-left">◀</button>
-        <button id="btn-backward">▼</button>
-        <button id="btn-right">▶</button>
+        <p style="font-size:36px">Tap / Click to Fly</p>
+        <p>
+          <strong>W / S</strong> — climb / dive &nbsp;|&nbsp;
+          <strong>A / D</strong> — turn<br/>
+          <strong>Q / E</strong> — change environment &nbsp;|&nbsp;
+          <strong>Space</strong> — formation<br/>
+          <em style="opacity:0.7;font-size:0.9em">
+            Mobile: use on-screen buttons &nbsp;|&nbsp; ENV cycles the sky &nbsp;|&nbsp; V toggles formation
+          </em>
+        </p>
       </div>
     </div>
 
+    <div id="app"></div>
+
+    <!-- ── LEFT: movement ───────────────────────────────────────────────── -->
+    <div id="mobile-controls">
+      <button class="ctrl-btn" id="btn-forward">▲</button>
+      <div class="ctrl-row">
+        <button class="ctrl-btn" id="btn-left">◀</button>
+        <button class="ctrl-btn" id="btn-backward">▼</button>
+        <button class="ctrl-btn" id="btn-right">▶</button>
+      </div>
+    </div>
+
+    <!-- ── RIGHT: env (top) + formation (bottom) ────────────────────────── -->
+    <div id="right-controls">
+      <button class="ctrl-btn ctrl-btn-tall" id="btn-env">
+        <span class="btn-icon">🌅</span>
+        <span class="btn-label">ENV</span>
+      </button>
+      <button class="ctrl-btn ctrl-btn-tall" id="btn-formation">
+        <span class="btn-icon">🕊️</span>
+        <span class="btn-label">V</span>
+      </button>
+    </div>
+
     <script type="module" src="/src/main.js"></script>
+
+    <script>
+      // ── AUTO-FULLSCREEN ON LANDSCAPE ────────────────────────────────────
+      // When a touch device rotates to landscape the browser chrome eats
+      // ~10% of the screen and obscures the bottom buttons. Requesting
+      // fullscreen removes the chrome so buttons sit flush with the edge.
+      function tryFullscreen() {
+        if (navigator.maxTouchPoints < 1) return;
+        const landscape = window.innerWidth > window.innerHeight;
+        if (landscape && !document.fullscreenElement) {
+          const el = document.documentElement;
+          const fn = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen;
+          fn?.call(el).catch(() => {}); // silently ignore if browser denies
+        } else if (!landscape && document.fullscreenElement) {
+          const fn = document.exitFullscreen || document.webkitExitFullscreen;
+          fn?.call(document).catch(() => {});
+        }
+      }
+      window.addEventListener('orientationchange', () => setTimeout(tryFullscreen, 200));
+      window.addEventListener('resize', tryFullscreen);
+    </script>
   </body>
 </html>

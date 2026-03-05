@@ -55,7 +55,7 @@ void main() {
     vec3 viewVector = normalize(cameraPosition - vWorldPosition);
     vec3 lightDir = normalize(uSunPosition);
     
-    // --- 1. BALANCED CAPILLARY MICRO-RIPPLES ---
+    // --- 1. CAPILLARY MICRO-RIPPLES ---
     vec2 uvNoise = vWorldPosition.xz * 0.15 + uTime * 0.3;
     float n1 = capillaryWaves(uvNoise);
     float n2 = capillaryWaves(uvNoise * 1.5 - uTime * 0.4);
@@ -87,37 +87,33 @@ void main() {
     vec3 upwellingColor = mix(uWaterDeepColor, uWaterColor, facingRatio);
     vec3 waterSurfaceColor = mix(upwellingColor, skyReflection, fresnel) * shadowFactor + scatterColor;
 
-    // --- 4. 3D VOLUMETRIC FOAM INTEGRATION ---
-    // WIDENED MASK: Dropped from 0.1 to -0.1. This allows foam to form on smaller 
-    // mid-sized waves and survive further down into the troughs.
+    // --- 4. VOLUMETRIC FOAM ---
     float foamMask = smoothstep(-0.1, 0.5, vChoppiness);
 
+    // Foam UV scrolls at the same rate the dominant Gerstner wave crests travel.
+    // Wave phase speed ≈ sqrt(9.8/k) * uTimeScale ≈ 13 units/s world space.
+    // foamUv scale = 0.03, so UV scroll = worldSpeed * 0.03 ≈ 0.04.
+    // Old value was 0.12 (3× too fast) making foam race ahead of the waves.
     vec2 foamUv = vWorldPosition.xz * 0.03 + normal.xz * 2.5;
-    foamUv.y -= uTime * 0.12; 
-    
+    foamUv.y -= uTime * 0.04;   // primary scroll — now matches wave crest speed
+
     float f1 = fbm(foamUv * 2.0);
-    float f2 = fbm(foamUv * 5.0 - uTime * 0.1);
+    float f2 = fbm(foamUv * 5.0 - uTime * 0.03);  // secondary detail, same direction, slightly slower
     
     float webNoise = abs(f1 - 0.5) * 2.0; 
     float webNoise2 = abs(f2 - 0.5) * 2.0;
     
     float rawFoam = 1.0 - (webNoise * 0.6 + webNoise2 * 0.4);
-    
-    // THICKER PATCHES: Dropped the lower bound from 0.1 to 0.0. 
-    // This makes the individual foam patches wider and less sparse.
     float foamThickness = smoothstep(0.1, 0.7, rawFoam) * foamMask;
     
-    // FOAM LIGHTING & EDGE GLOW
     float foamLighting = mix(0.5, 1.1, lightShadow); 
     vec3 thickFoamColor = vec3(0.95, 0.98, 1.0) * foamLighting;
     vec3 foamEdgeColor = uWaterColor * 1.5; 
-    
     vec3 finalFoamAlbedo = mix(foamEdgeColor, thickFoamColor, smoothstep(0.1, 0.5, foamThickness));
 
     // --- 5. COMPOSITION ---
     vec3 sunReflectionDir = reflect(-lightDir, normal);
     float glint = max(0.0, dot(sunReflectionDir, viewVector));
-    
     float specular = pow(glint, 800.0) * 20.0 * (1.0 + n1 * 5.0) * (1.0 - foamThickness) * shadowFactor;
 
     vec3 finalColor = waterSurfaceColor + vec3(specular);
@@ -133,7 +129,6 @@ void main() {
     
     finalColor = mix(finalColor, horizonColor, fogFactor);
 
-    // This is the crucial part I accidentally left out!
     gl_FragColor = vec4(finalColor, 1.0);
 
     #include <tonemapping_fragment>
