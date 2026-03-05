@@ -892,19 +892,22 @@ function animate(currentTime) {
         if (birdWrapper) {
             birdGroup.updateMatrixWorld(true);
 
-            // Camera at local(0, H, dist) — X=0 keeps it on the yaw axis so
-            // turning never swings the camera in a lateral arc.
+            // Camera sits at birdGroup.local(0, H, dist).
+            // X=0 keeps it exactly on the yaw axis — turning never swings it sideways.
             _camLocal.set(0, currentCamH, currentCamDist);
             camera.position.copy(_camLocal).applyMatrix4(birdGroup.matrixWorld);
 
-            // Look at the bird's actual visual centre in world space.
-            birdWrapper.getWorldPosition(_birdWorldCenter);
-            // Nudge Y up slightly so camera looks at body, not feet.
-            _birdWorldCenter.y += 8;
+            // CRITICAL: look at birdGroup's OWN world position, not birdWrapper.
+            // birdWrapper has WRAP_BASE.x=13 local offset which traces a sideways
+            // arc during yaw — using it as a lookAt target was what caused the bird
+            // to drift to screen corners when turning. birdGroup.position is always
+            // on the yaw axis, so the bird stays dead-centre through any turn.
+            _birdWorldCenter.copy(birdGroup.position);
+            _birdWorldCenter.y += 6;  // lift gaze to bird body, not rig floor
 
             camera.up.set(0, 1, 0);
             camera.lookAt(_birdWorldCenter);
-            // Subtle roll to make banking feel physical — kept very small.
+            // Very subtle roll echo — just enough to feel physical, not disorienting.
             camera.rotateZ(-tiltGroup.rotation.z * 0.06);
         }
     }
