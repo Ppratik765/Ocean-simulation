@@ -90,11 +90,15 @@ void main() {
     // --- 4. VOLUMETRIC FOAM ---
     float foamMask = smoothstep(-0.1, 0.5, vChoppiness);
 
+    // Foam UV scrolls at the same rate the dominant Gerstner wave crests travel.
+    // Wave phase speed ≈ sqrt(9.8/k) * uTimeScale ≈ 13 units/s world space.
+    // foamUv scale = 0.03, so UV scroll = worldSpeed * 0.03 ≈ 0.04.
+    // Old value was 0.12 (3× too fast) making foam race ahead of the waves.
     vec2 foamUv = vWorldPosition.xz * 0.03 + normal.xz * 2.5;
-    foamUv.y -= uTime * 0.12; 
-    
+    foamUv.y -= uTime * 0.04;   // primary scroll — now matches wave crest speed
+
     float f1 = fbm(foamUv * 2.0);
-    float f2 = fbm(foamUv * 5.0 - uTime * 0.1);
+    float f2 = fbm(foamUv * 5.0 - uTime * 0.03);  // secondary detail, same direction, slightly slower
     
     float webNoise = abs(f1 - 0.5) * 2.0; 
     float webNoise2 = abs(f2 - 0.5) * 2.0;

@@ -58,17 +58,34 @@ const customOceanMaterial = new THREE.ShaderMaterial({
     }
 });
 
-// Mobile: 256×256 mesh (16× fewer vertices than desktop 1024×1024)
-const oceanRes = isMobile ? 256 : 1024;
+// Mobile: 512×512 — noticeably better than 256 while still 4× cheaper than
+// desktop 1024. Paired with a 2×2 grid the total vertex count stays lean.
+const oceanRes  = isMobile ? 512  : 1024;
+const GRID_DIM  = isMobile ? 2    : 3;    // 2×2 mobile, 3×3 desktop
+const GRID_HALF = (GRID_DIM - 1) / 2;    // 0.5 for 2×2 → offsets ±5000; 1 for 3×3 → offsets ±10000
 const geometry = new THREE.PlaneGeometry(10000, 10000, oceanRes, oceanRes);
 geometry.rotateX(-Math.PI / 2);
+
+// ─────────────────────────────────────────────
+// OCEAN GRID — omnidirectional infinite treadmill.
+// Tiles snap to nearest TILE_SIZE multiple of bird position every frame.
+// 2×2 covers ±10 000 units in all directions (fog hides the edge at distance).
+// 3×3 covers ±15 000 — never visibly finite on desktop.
+// ─────────────────────────────────────────────
+const TILE_SIZE = 10000;
 const oceans = [];
-for (let i = 0; i < 3; i++) {
-    const o = new THREE.Mesh(geometry, customOceanMaterial);
-    o.position.z  = -i * 10000;
-    o.receiveShadow = true;   // ocean receives shadows cast by boats/props
-    scene.add(o);
-    oceans.push(o);
+for (let row = 0; row < GRID_DIM; row++) {
+    for (let col = 0; col < GRID_DIM; col++) {
+        const o = new THREE.Mesh(geometry, customOceanMaterial);
+        o.position.set(
+            (col - GRID_HALF) * TILE_SIZE,
+            0,
+            (row - GRID_HALF) * TILE_SIZE
+        );
+        o.receiveShadow = !isMobile;
+        scene.add(o);
+        oceans.push(o);
+    }
 }
 
 // ─────────────────────────────────────────────
@@ -603,6 +620,13 @@ if (btnFormation) {
     btnFormation.addEventListener('mousedown',  ()  => { toggleFormation(); });
 }
 
+// ENV button — cycles skybox forward (same as keyboard E)
+const btnEnv = document.getElementById('btn-env');
+if (btnEnv) {
+    btnEnv.addEventListener('touchstart', (e) => { e.preventDefault(); switchSkybox(1); });
+    btnEnv.addEventListener('mousedown',  ()  => { switchSkybox(1); });
+}
+
 window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
@@ -686,8 +710,23 @@ function animate(currentTime) {
         lockRootBones(allWrappers[i]?.children[0] ?? null);
     });
 
-    // ── OCEAN TREADMILL ───────────────────────────────────────────────────
-    oceans.forEach(o => { if (camera.position.z < o.position.z - 10000) o.position.z -= 30000; });
+    // ── OCEAN GRID SNAP ───────────────────────────────────────────────────
+    // Snap the grid centre to the nearest TILE_SIZE multiple of birdGroup XZ.
+    // Each tile then positions itself at gridCentre + its (col,row) offset.
+    // Because tiles jump a full TILE_SIZE at once they are never visible mid-move.
+    const snapX = Math.round(birdGroup.position.x / TILE_SIZE) * TILE_SIZE;
+    const snapZ = Math.round(birdGroup.position.z / TILE_SIZE) * TILE_SIZE;
+    let tileIdx = 0;
+    for (let row = 0; row < GRID_DIM; row++) {
+        for (let col = 0; col < GRID_DIM; col++) {
+            oceans[tileIdx].position.set(
+                snapX + (col - GRID_HALF) * TILE_SIZE,
+                0,
+                snapZ + (row - GRID_HALF) * TILE_SIZE
+            );
+            tileIdx++;
+        }
+    }
 
     // ── SHADER TIME ───────────────────────────────────────────────────────
     customOceanMaterial.uniforms.uTime.value = t * 1.25;

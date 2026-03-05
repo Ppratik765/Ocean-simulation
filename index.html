@@ -7,112 +7,102 @@
     <title>Ocean Simulation</title>
     <link rel="stylesheet" href="/src/style.css">
     <style>
-      /* ── MOBILE CONTROLS ─────────────────────────────────────────────── */
-      #mobile-controls {
-        position: fixed;
-        bottom: 30px;
-        left: 20px;
-        z-index: 100;
+      /* ── DETECT TOUCH DEVICES by capability, not width ──────────────────
+         hover:none + pointer:coarse = touchscreen (phone/tablet).
+         This correctly shows controls on phones in ANY orientation —
+         portrait OR landscape — while hiding them on mouse desktops.        */
+
+      #mobile-controls,
+      #right-controls { display: none; }
+
+      @media (hover: none) and (pointer: coarse) {
+        /* ── LEFT: movement cluster ────────────────────────────────────── */
+        #mobile-controls {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          position: fixed;
+          bottom: 28px;
+          left: 18px;
+          z-index: 100;
+          gap: 6px;
+          opacity: 0.5;
+          transition: opacity 0.15s;
+        }
+
+        /* ── RIGHT: env + formation stacked ───────────────────────────── */
+        #right-controls {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          position: fixed;
+          bottom: 28px;
+          right: 18px;
+          z-index: 100;
+          gap: 6px;
+          opacity: 0.5;
+          transition: opacity 0.15s;
+        }
+
+        #mobile-controls:active,
+        #right-controls:active { opacity: 0.9; }
+
+        /* ── LANDSCAPE: tighter layout ─────────────────────────────────── */
+        @media (orientation: landscape) {
+          #mobile-controls  { bottom: 10px; left: 12px; gap: 4px; }
+          #right-controls   { bottom: 10px; right: 12px; gap: 4px; }
+          .ctrl-btn         { width: 48px !important; height: 48px !important; font-size: 18px !important; }
+          .ctrl-btn-tall    { height: 52px !important; }
+          .ctrl-btn .btn-label { font-size: 10px !important; }
+        }
+      }
+
+      /* ── SHARED BUTTON STYLE ─────────────────────────────────────────── */
+      .ctrl-btn {
+        width: 56px;
+        height: 56px;
+        background: rgba(0,0,0,0.5);
+        border: 1px solid rgba(255,255,255,0.22);
+        color: #fff;
+        border-radius: 12px;
+        font-size: 21px;
         display: flex;
         flex-direction: column;
-        align-items: center;
-        gap: 6px;
-        opacity: 0.45;
-        transition: opacity 0.2s;
-      }
-      #mobile-controls:active { opacity: 0.85; }
-
-      /* Formation button — bottom-right corner */
-      #formation-control {
-        position: fixed;
-        bottom: 30px;
-        right: 20px;
-        z-index: 100;
-        opacity: 0.45;
-        transition: opacity 0.2s;
-      }
-      #formation-control:active { opacity: 0.85; }
-
-      /* Hide both on desktop */
-      @media (min-width: 769px) {
-        #mobile-controls  { display: none; }
-        #formation-control { display: none; }
-      }
-
-      /* ── BUTTON STYLE (shared) ───────────────────────────────────────── */
-      .ctrl-btn {
-        width: 58px;
-        height: 58px;
-        background: rgba(0, 0, 0, 0.45);
-        border: 1px solid rgba(255, 255, 255, 0.25);
-        color: white;
-        border-radius: 12px;
-        font-size: 22px;
-        display: flex;
         justify-content: center;
         align-items: center;
+        gap: 2px;
         touch-action: none;
         user-select: none;
         -webkit-user-select: none;
         cursor: pointer;
         -webkit-tap-highlight-color: transparent;
+        box-sizing: border-box;
       }
-
-      /* Formation button slightly wider to fit label */
-      #btn-formation {
-        width: auto;
-        min-width: 58px;
-        padding: 0 12px;
-        font-size: 13px;
-        letter-spacing: 0.5px;
-        flex-direction: column;
-        gap: 2px;
-        height: 62px;
-      }
-
-      .ctrl-row {
-        display: flex;
-        gap: 6px;
-      }
-
-      /* ── LANDSCAPE: keep controls in corners, increase gap so thumbs fit */
-      @media (max-width: 768px) and (orientation: landscape) {
-        #mobile-controls {
-          bottom: 14px;
-          left: 14px;
-          gap: 4px;
-        }
-        #formation-control {
-          bottom: 14px;
-          right: 14px;
-        }
-        .ctrl-btn {
-          width: 50px;
-          height: 50px;
-          font-size: 19px;
-        }
-        #btn-formation {
-          height: 54px;
-          font-size: 12px;
-        }
-      }
+      .ctrl-btn-tall { height: 62px; }
+      .ctrl-btn .btn-icon  { font-size: 19px; line-height: 1; }
+      .ctrl-btn .btn-label { font-size: 11px; opacity: 0.8; line-height: 1; }
+      .ctrl-row { display: flex; gap: 6px; }
     </style>
   </head>
   <body>
     <div id="blocker">
       <div id="instructions">
-        <p style="font-size:36px">Click to Simulate</p>
+        <p style="font-size:36px">Tap / Click to Fly</p>
         <p>
-          WASD / buttons to fly &nbsp;|&nbsp;
-          Environment: Q / E<br/>
-          Formation: <strong>Spacebar</strong> (or the V button on mobile)
+          <strong>W / S</strong> — climb / dive &nbsp;|&nbsp;
+          <strong>A / D</strong> — turn<br/>
+          <strong>Q / E</strong> — change environment &nbsp;|&nbsp;
+          <strong>Space</strong> — formation<br/>
+          <em style="opacity:0.7;font-size:0.9em">
+            Mobile: use on-screen buttons &nbsp;|&nbsp; ENV cycles the sky &nbsp;|&nbsp; V toggles formation
+          </em>
         </p>
       </div>
     </div>
 
     <div id="app"></div>
 
-    <!-- Left cluster: movement -->
+    <!-- ── LEFT: movement ───────────────────────────────────────────────── -->
     <div id="mobile-controls">
       <button class="ctrl-btn" id="btn-forward">▲</button>
       <div class="ctrl-row">
@@ -122,14 +112,39 @@
       </div>
     </div>
 
-    <!-- Right corner: formation toggle -->
-    <div id="formation-control">
-      <button class="ctrl-btn" id="btn-formation">
-        <span style="font-size:18px">🐦‍🔥</span>
-        <span>V</span>
+    <!-- ── RIGHT: env (top) + formation (bottom) ────────────────────────── -->
+    <div id="right-controls">
+      <button class="ctrl-btn ctrl-btn-tall" id="btn-env">
+        <span class="btn-icon">🌅</span>
+        <span class="btn-label">ENV</span>
+      </button>
+      <button class="ctrl-btn ctrl-btn-tall" id="btn-formation">
+        <span class="btn-icon">🕊️</span>
+        <span class="btn-label">V</span>
       </button>
     </div>
 
     <script type="module" src="/src/main.js"></script>
+
+    <script>
+      // ── AUTO-FULLSCREEN ON LANDSCAPE ────────────────────────────────────
+      // When a touch device rotates to landscape the browser chrome eats
+      // ~10% of the screen and obscures the bottom buttons. Requesting
+      // fullscreen removes the chrome so buttons sit flush with the edge.
+      function tryFullscreen() {
+        if (navigator.maxTouchPoints < 1) return;
+        const landscape = window.innerWidth > window.innerHeight;
+        if (landscape && !document.fullscreenElement) {
+          const el = document.documentElement;
+          const fn = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen;
+          fn?.call(el).catch(() => {}); // silently ignore if browser denies
+        } else if (!landscape && document.fullscreenElement) {
+          const fn = document.exitFullscreen || document.webkitExitFullscreen;
+          fn?.call(document).catch(() => {});
+        }
+      }
+      window.addEventListener('orientationchange', () => setTimeout(tryFullscreen, 200));
+      window.addEventListener('resize', tryFullscreen);
+    </script>
   </body>
 </html>
