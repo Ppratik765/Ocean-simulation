@@ -638,39 +638,26 @@ window.addEventListener('resize', () => {
 // ─────────────────────────────────────────────
 // 11. CAMERA CONSTANTS
 //
-// These use the ORIGINAL confirmed-working formula:
-//   point.applyMatrix4(birdGroup.matrixWorld)
+// Camera sits at birdGroup.local(0, H, Z) — X is always ZERO.
+// X=0 means the camera is exactly on the yaw axis, so rotating birdGroup
+// never swings the camera sideways. Previously CAM_X=8.5 caused the bird
+// to drift to corners during turns because the camera orbited at a
+// different radius to the bird's visual centre.
 //
-// CAM_OFFSET_LOCAL: camera sits behind and slightly above the bird in its local frame.
-//   X = 8.5  → laterally centres on the bird's visual spine (matches WRAP_BASE.x
-//              adjusted for the GLB's internal mass centre, empirically tuned)
-//   Y = -4.0 → camera is 4 units above the bird's rig origin, giving a slight
-//              downward angle so the bird appears in upper-centre of screen
-//   Z = (runtime) currentCamDist, positive = behind (bird flies in -Z direction)
-//
-// CAM_LOOKAT_LOCAL: what the camera always points at.
-//   X = 8.5  → same lateral alignment as camera (bird is always screen-centre)
-//   Y = -9.0 → the approximate Y centre of the bird mesh in local rig space
-//   Z = -10.0→ slightly ahead of birdGroup origin (camera looks "through" the bird)
+// The camera LOOKS AT birdWrapper.getWorldPosition() every frame — the
+// bird's actual visual centre — so no hardcoded X offset is needed at all.
 // ─────────────────────────────────────────────
-const CAM_X         =  8.5;
-const CAM_Y_OFFSET  = -4.0;
-const CAM_LOOK_Y    = -9.0;
-const CAM_LOOK_Z    = -10.0;
-
-// Solo: close and tight.  Formation: zoomed out to frame all 5 birds.
 const CAM_SOLO_DIST =  10.0;
 const CAM_FORM_DIST =  70.0;
-const CAM_SOLO_H    = -4.0;    // Y offset of camera (local)
-const CAM_FORM_H    =  20.0;   // Y offset of camera (local) in formation
+const CAM_SOLO_H    =   4.0;
+const CAM_FORM_H    =  20.0;
 
 let currentCamDist = CAM_SOLO_DIST;
 let currentCamH    = CAM_SOLO_H;
-let currentLookZ   = CAM_LOOK_Z;   // lerped so formation toggle has no snap
+let currentLookZ   = 0; // kept so lerp lines below still compile
 
-// Pre-allocated vectors — allocated once, reused every frame (avoids GC)
-const _camLocal    = new THREE.Vector3();
-const _lookLocal   = new THREE.Vector3();
+const _camLocal        = new THREE.Vector3();
+const _birdWorldCenter = new THREE.Vector3();
 
 
 // ─────────────────────────────────────────────
@@ -738,13 +725,11 @@ function animate(currentTime) {
     currentBloom += (targetBloom - currentBloom) * Math.min(delta * 8, 1);
     bloomPass.strength = currentBloom;
 
-    // ── CAMERA ZOOM SCALARS (lerp only the scalar, not the position) ──────
-    const tDist  = isFormation ? CAM_FORM_DIST : CAM_SOLO_DIST;
-    const tH     = isFormation ? CAM_FORM_H    : CAM_SOLO_H;
-    const tLookZ = isFormation ? 13.0          : CAM_LOOK_Z;
-    currentCamDist += (tDist  - currentCamDist) * Math.min(delta * 3, 1);
-    currentCamH    += (tH     - currentCamH)    * Math.min(delta * 3, 1);
-    currentLookZ   += (tLookZ - currentLookZ)   * Math.min(delta * 3, 1);
+    // ── CAMERA ZOOM SCALARS ───────────────────────────────────────────────
+    const tDist = isFormation ? CAM_FORM_DIST : CAM_SOLO_DIST;
+    const tH    = isFormation ? CAM_FORM_H    : CAM_SOLO_H;
+    currentCamDist += (tDist - currentCamDist) * Math.min(delta * 3, 1);
+    currentCamH    += (tH    - currentCamH)    * Math.min(delta * 3, 1);
 
     // ── FLIGHT ────────────────────────────────────────────────────────────
     if (isSimulating) {
@@ -907,15 +892,20 @@ function animate(currentTime) {
         if (birdWrapper) {
             birdGroup.updateMatrixWorld(true);
 
-            _camLocal.set(CAM_X, currentCamH, currentCamDist);
-            _lookLocal.set(CAM_X, CAM_LOOK_Y, currentLookZ);   // lerped Z = no snap
-
+            // Camera at local(0, H, dist) — X=0 keeps it on the yaw axis so
+            // turning never swings the camera in a lateral arc.
+            _camLocal.set(0, currentCamH, currentCamDist);
             camera.position.copy(_camLocal).applyMatrix4(birdGroup.matrixWorld);
-            _lookLocal.applyMatrix4(birdGroup.matrixWorld);
+
+            // Look at the bird's actual visual centre in world space.
+            birdWrapper.getWorldPosition(_birdWorldCenter);
+            // Nudge Y up slightly so camera looks at body, not feet.
+            _birdWorldCenter.y += 8;
 
             camera.up.set(0, 1, 0);
-            camera.lookAt(_lookLocal);
-            camera.rotateZ(-tiltGroup.rotation.z * 0.08);
+            camera.lookAt(_birdWorldCenter);
+            // Subtle roll to make banking feel physical — kept very small.
+            camera.rotateZ(-tiltGroup.rotation.z * 0.06);
         }
     }
 
