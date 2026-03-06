@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="/wave.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
-    <title>Wave Glider</title>
+    <title>Ocean Simulation</title>
     <link rel="stylesheet" href="/src/style.css">
     <style>
       /* ── DETECT TOUCH DEVICES by capability, not width ──────────────────
@@ -15,7 +15,25 @@
       #mobile-controls,
       #right-controls { display: none; }
 
-      @media (hover: none) and (pointer: coarse) {
+      /* JS fallback for S Pen devices (Note 10 etc.) that misreport pointer
+         as "fine" — JS detects maxTouchPoints > 0 and adds this class. */
+      html.is-touch #mobile-controls,
+      html.is-touch #right-controls {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        position: fixed;
+        z-index: 100;
+        gap: 6px;
+        opacity: 0.5;
+        transition: opacity 0.15s;
+      }
+      html.is-touch #mobile-controls          { bottom: 28px; left: 18px; }
+      html.is-touch #right-controls           { bottom: 28px; right: 18px; }
+      html.is-touch #mobile-controls:active,
+      html.is-touch #right-controls:active    { opacity: 0.9; }
+
+      @media (any-pointer: coarse) {
         /* ── LEFT: movement cluster ────────────────────────────────────── */
         #mobile-controls {
           display: flex;
@@ -119,7 +137,7 @@
         <span class="btn-label">ENV</span>
       </button>
       <button class="ctrl-btn ctrl-btn-tall" id="btn-formation">
-        <span class="btn-icon">🕊️</span>
+        <span class="btn-icon">🐦</span>
         <span class="btn-label">V</span>
       </button>
     </div>
@@ -127,17 +145,30 @@
     <script type="module" src="/src/main.js"></script>
 
     <script>
+      // ── TOUCH BUTTON VISIBILITY — JS FALLBACK ───────────────────────────
+      // CSS `any-pointer: coarse` is correct in theory but Samsung devices
+      // with S Pen (Note 10, Tab S series, etc.) can report pointer: fine
+      // to the browser even when only the touchscreen is in use, because the
+      // hardware stylus is registered as a fine pointer input device.
+      // This causes the CSS rule to never fire, hiding all touch buttons.
+      //
+      // Fix: if the device physically has touch points (maxTouchPoints > 0)
+      // OR the legacy ontouchstart API exists, we force-show the controls
+      // via a class on <html>, regardless of what CSS pointer queries report.
+      // This is evaluated synchronously so there's no flash of hidden controls.
+      (function () {
+        const hasTouch = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
+        if (hasTouch) document.documentElement.classList.add('is-touch');
+      })();
+
       // ── AUTO-FULLSCREEN ON LANDSCAPE ────────────────────────────────────
-      // When a touch device rotates to landscape the browser chrome eats
-      // ~10% of the screen and obscures the bottom buttons. Requesting
-      // fullscreen removes the chrome so buttons sit flush with the edge.
       function tryFullscreen() {
         if (navigator.maxTouchPoints < 1) return;
         const landscape = window.innerWidth > window.innerHeight;
         if (landscape && !document.fullscreenElement) {
           const el = document.documentElement;
           const fn = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen;
-          fn?.call(el).catch(() => {}); // silently ignore if browser denies
+          fn?.call(el).catch(() => {});
         } else if (!landscape && document.fullscreenElement) {
           const fn = document.exitFullscreen || document.webkitExitFullscreen;
           fn?.call(document).catch(() => {});
