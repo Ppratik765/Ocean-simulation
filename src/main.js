@@ -171,11 +171,11 @@ gltfLoader.load('/bird.glb', (gltf) => {
 function getBobOffset(phase, t) { return Math.sin(t * 0.4 + phase) * 1.5; }
 
 const PROP_DISTRIBUTION = [
-    { file: 'boat_1',         count: 3, scale: 0.8,  yBase: -5.0 },
-    { file: 'boat_2',         count: 3, scale: 0.8,  yBase: -5.0 },
-    { file: 'barrel',         count: 4, scale: 1.2,  yBase: -0.6 },
-    { file: 'crate',          count: 4, scale: 1.0,  yBase: -0.5 },
-    { file: 'treasure_chest', count: 4, scale: 0.9,  yBase: -0.5 },
+    { file: 'boat_1',         count: 3, scale: 0.6,  yBase: -6.0 },
+    { file: 'boat_2',         count: 3, scale: 0.6,  yBase: -6.0 },
+    { file: 'barrel',         count: 4, scale: 1.8,  yBase: -1.2 },
+    { file: 'crate',          count: 4, scale: 1.3,  yBase: -1.2 },
+    { file: 'treasure_chest', count: 4, scale: 1.6,  yBase: -1.2 },
 ];
 const SPAWN_MIN_DIST = 400, SPAWN_MAX_DIST = 3000, RECYCLE_DIST = 3200;
 const propPool = [];
@@ -290,12 +290,12 @@ let   isScattering    = false, scatterCooldown = 0;
 
 // ─── POST-PROCESSING ──────────────────────────────────────────────────────────
 const msaaTarget = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
-    samples:    isMobile ? 1 : 2,   // ×2 visually identical to ×4 at half fillrate
+    samples:    isMobile ? 2 : 4,   // ×2 visually identical to ×4 at half fillrate
     type:       THREE.HalfFloatType,
     colorSpace: renderer.outputColorSpace
 });
 const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
-bloomPass.threshold = 0.99; bloomPass.radius = 0.05;
+bloomPass.threshold = 0.99; bloomPass.radius = 0.04;
 const composer = new EffectComposer(renderer, msaaTarget);
 composer.addPass(new RenderPass(scene, camera));
 composer.addPass(bloomPass);
