@@ -55,7 +55,7 @@ const customOceanMaterial = new THREE.ShaderMaterial({
     }
 });
 
-const oceanRes  = isMobile ? 384  : 1024;
+const oceanRes  = isMobile ? 384  : 900;
 const GRID_DIM  = 3;
 const GRID_HALF = 1;
 const TILE_SIZE = 10000;
