@@ -290,7 +290,7 @@ let   isScattering    = false, scatterCooldown = 0;
 
 // ─── POST-PROCESSING ──────────────────────────────────────────────────────────
 const msaaTarget = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
-    samples:    isMobile ? 2 : 4,   // ×2 visually identical to ×4 at half fillrate
+    samples:    isMobile ? 1 : 2,   // ×2 visually identical to ×4 at half fillrate
     type:       THREE.HalfFloatType,
     colorSpace: renderer.outputColorSpace
 });
