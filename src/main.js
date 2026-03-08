@@ -20,7 +20,7 @@ const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
               || (navigator.maxTouchPoints > 1 && window.innerWidth < 1024);
 
 const renderer = new THREE.WebGLRenderer({ antialias: !isMobile, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, isMobile ? 1.0 : 1.25));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, isMobile ? 1.0 : 1.5));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.shadowMap.enabled = !isMobile;
@@ -88,8 +88,8 @@ const TILE_SIZE  = 10000;
 const GRID_DIM   = 3;
 const GRID_HALF  = 1;
 
-const oceanResHigh = isMobile ? 256 : 768;   // centre tile
-const oceanResLow  = isMobile ?  64 : 192;   // 8 surrounding tiles — far from camera
+const oceanResHigh = isMobile ? 384 : 768;   // centre tile
+const oceanResLow  = isMobile ?  128 : 256;   // 8 surrounding tiles — far from camera
 
 const geoHigh = new THREE.PlaneGeometry(TILE_SIZE, TILE_SIZE, oceanResHigh, oceanResHigh);
 geoHigh.rotateX(-Math.PI / 2);
@@ -301,7 +301,7 @@ PROP_DISTRIBUTION.forEach(typeDef => {
             if (isBoat) {
                 creak = new THREE.PositionalAudio(listener);
                 creak.setLoop(true);
-                creak.setVolume(0.7);
+                creak.setVolume(0.9);
                 creak.setRefDistance(40);
                 creak.setRolloffFactor(1.5);
                 creak.setMaxDistance(350);
@@ -400,9 +400,6 @@ scene.add(new THREE.HemisphereLight(0x8ab0d0, 0x0d1a24, 0.6));
 const sunLight = new THREE.DirectionalLight(0xfff5e0, 1.8);
 sunLight.position.copy(customOceanMaterial.uniforms.uSunPosition.value).multiplyScalar(100);
 sunLight.castShadow           = !isMobile;
-// 1024 shadow map is sufficient when the bird always flies at >22 units altitude.
-// The shadow frustum covers 1200×1200 units — at that scale, 1024 texels = 1.17
-// units/texel. This is finer than any shadow edge visible from above.
 sunLight.shadow.mapSize.width = sunLight.shadow.mapSize.height = 1024;
 sunLight.shadow.camera.near   = 1;    sunLight.shadow.camera.far    = 1000;
 sunLight.shadow.camera.left   = -600; sunLight.shadow.camera.right  =  600;
