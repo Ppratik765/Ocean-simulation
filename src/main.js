@@ -301,7 +301,7 @@ PROP_DISTRIBUTION.forEach(typeDef => {
             if (isBoat) {
                 creak = new THREE.PositionalAudio(listener);
                 creak.setLoop(true);
-                creak.setVolume(0.9);
+                creak.setVolume(0.99);
                 creak.setRefDistance(40);
                 creak.setRolloffFactor(1.5);
                 creak.setMaxDistance(350);
@@ -413,7 +413,7 @@ let audioStarted = false;
 const oceanSound = new THREE.Audio(listener);
 let   audioReady = false;
 new THREE.AudioLoader().load('/ocean_sound.mp3', (buf) => {
-    oceanSound.setBuffer(buf); oceanSound.setLoop(true); oceanSound.setVolume(0.80);
+    oceanSound.setBuffer(buf); oceanSound.setLoop(true); oceanSound.setVolume(0.90);
     audioReady = true;
     if (audioStarted && !oceanSound.isPlaying) oceanSound.play();
 });
@@ -436,7 +436,7 @@ function playSeagull() {
     const s = seagullSounds[seagullIdx++ % SEAGULL_POOL];
     if (s.isPlaying) s.stop();
     s.setPlaybackRate(0.80 + Math.random() * 0.38);
-    s.setVolume(0.30 + Math.random() * 0.35);
+    s.setVolume(0.50 + Math.random() * 0.35);
     s.play();
 }
 
@@ -446,7 +446,7 @@ const flapSound   = new THREE.Audio(listener);
 let   flapBuf     = null;
 new THREE.AudioLoader().load('/wind_flapping.m4a', (buf) => {
     flapBuf = buf;
-    flapSound.setBuffer(buf); flapSound.setLoop(false); flapSound.setVolume(0.20);
+    flapSound.setBuffer(buf); flapSound.setLoop(false); flapSound.setVolume(0.60);
 });
 function playFlap() {
     if (!flapBuf) return;
@@ -538,6 +538,19 @@ const btnF = document.getElementById('btn-formation');
 if (btnF) { btnF.addEventListener('touchstart',(e)=>{e.preventDefault();toggleFormation();}); btnF.addEventListener('mousedown',toggleFormation); }
 const btnE = document.getElementById('btn-env');
 if (btnE) { btnE.addEventListener('touchstart',(e)=>{e.preventDefault();switchSkybox(1);}); btnE.addEventListener('mousedown',()=>switchSkybox(1)); }
+
+// ─── TAB VISIBILITY (AUDIO PAUSE) ─────────────────────────────────────────────
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+        if (listener.context.state === 'running') {
+            listener.context.suspend();
+        }
+    } else {
+        if (isSimulating && listener.context.state === 'suspended') {
+            listener.context.resume();
+        }
+    }
+});
 
 window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
