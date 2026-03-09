@@ -342,7 +342,6 @@ let   isScattering    = false, scatterCooldown = 0;
 const msaaTarget = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
     samples:    isMobile ? 1 : 2,   // MSAA ×2 for sub-pixel geometry; SMAA handles image-space
     type:       THREE.HalfFloatType,
-    colorSpace: renderer.outputColorSpace,
 });
 const smaaPass  = new SMAAPass(window.innerWidth, window.innerHeight);
 const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
