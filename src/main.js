@@ -496,10 +496,18 @@ function toggleFormation() {
 document.addEventListener('keydown', (e) => {
     if (e.code === 'Escape') { isSimulating = false; blocker.style.display = 'flex'; return; }
     switch (e.code) {
-        case 'KeyW': moveState.forward  = true;  break;
-        case 'KeyA': moveState.left     = true;  break;
-        case 'KeyS': moveState.backward = true;  break;
-        case 'KeyD': moveState.right    = true;  break;
+        case 'KeyW':
+        case 'ArrowUp': 
+            moveState.forward  = true;  break;
+        case 'KeyA': 
+        case 'ArrowLeft':
+            moveState.left     = true;  break;
+        case 'KeyS': 
+        case 'ArrowDown':
+            moveState.backward = true;  break;
+        case 'KeyD': 
+        case 'ArrowRight':
+            moveState.right    = true;  break;
         case 'KeyQ': switchSkybox(-1);           break;
         case 'KeyE': switchSkybox(1);            break;
         case 'Space': e.preventDefault(); toggleFormation(); break;
@@ -507,10 +515,18 @@ document.addEventListener('keydown', (e) => {
 });
 document.addEventListener('keyup', (e) => {
     switch (e.code) {
-        case 'KeyW': moveState.forward  = false; break;
-        case 'KeyA': moveState.left     = false; break;
-        case 'KeyS': moveState.backward = false; break;
-        case 'KeyD': moveState.right    = false; break;
+        case 'KeyW': 
+        case 'ArrowUp':
+            moveState.forward  = false; break;
+        case 'KeyA': 
+        case 'ArrowLeft':
+            moveState.left     = false; break;
+        case 'KeyS': 
+        case 'ArrowDown':
+            moveState.backward = false; break;
+        case 'KeyD': 
+        case 'ArrowRight':
+            moveState.right    = false; break;
     }
 });
 
