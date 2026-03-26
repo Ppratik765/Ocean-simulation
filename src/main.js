@@ -19,9 +19,7 @@ const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerH
 const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
               || (navigator.maxTouchPoints > 1 && window.innerWidth < 1024);
 
-// MATH REDUCTION: Turned off default antialias. Your msaaTarget handles this already. 
-// This frees up wasted GPU memory and stops the background double-tax.
-const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+const renderer = new THREE.WebGLRenderer({ antialias: !isMobile, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, isMobile ? 1.1 : 1.5));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
