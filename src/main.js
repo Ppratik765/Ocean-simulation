@@ -63,7 +63,16 @@ oceanVertSrc = oceanVertSrc.replace(
 const oceanFragSrc = isMobile
     ? oceanFrag.replace('i < 4', 'i < 2')
     : oceanFrag;
-const sprayVertSrc = sprayVert.replace('i < 16', 'i < 4');
+let sprayVertSrc = sprayVert.replace('i < 16', 'i < 4');
+
+// THE OVERDRAW FIX: Instantly collapses particles behind the camera or miles away.
+sprayVertSrc = sprayVertSrc.replace(
+    /gl_PointSize\s*=\s*([^;]+);/,
+    `gl_PointSize = $1;
+     vec4 viewPos = modelViewMatrix * vec4(position, 1.0);
+     // viewPos.z is negative in front of the camera. If positive (behind us) or too far, skip drawing!
+     if (viewPos.z > 0.0 || -viewPos.z > 2500.0) gl_PointSize = 0.0;`
+);
 
 const customOceanMaterial = new THREE.ShaderMaterial({
     vertexShader: oceanVertSrc, fragmentShader: oceanFragSrc,
@@ -114,6 +123,10 @@ for (let row = 0; row < GRID_DIM; row++) {
         const o = new THREE.Mesh(isCentre ? geoHigh : geoLow, customOceanMaterial);
         o.position.set((col - GRID_HALF) * TILE_SIZE, 0, (row - GRID_HALF) * TILE_SIZE);
         o.receiveShadow = !isMobile;
+
+        o.matrixAutoUpdate = false; 
+        o.updateMatrix();
+      
         scene.add(o);
         oceans.push({ mesh: o, isCentre });
     }
@@ -627,7 +640,13 @@ function animate(currentTime) {
     for (let row = 0; row < GRID_DIM; row++) {
         for (let col = 0; col < GRID_DIM; col++) {
             const { mesh } = oceans[tileIdx];
-            mesh.position.set(snapX + (col - GRID_HALF)*TILE_SIZE, 0, snapZ + (row - GRID_HALF)*TILE_SIZE);
+            const newX = snapX + (col - GRID_HALF)*TILE_SIZE;
+            const newZ = snapZ + (row - GRID_HALF)*TILE_SIZE;
+            if (mesh.position.x !== newX || mesh.position.z !== newZ) {
+                mesh.position.set(newX, 0, newZ);
+                mesh.updateMatrix();
+            }
+            
             if (row === GRID_HALF && col === GRID_HALF) newCentreIdx = tileIdx;
             tileIdx++;
         }
