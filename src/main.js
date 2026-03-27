@@ -104,7 +104,7 @@ const customOceanMaterial = new THREE.ShaderMaterial({
 // nearest TILE_SIZE multiple of the bird position). The 8 surrounding tiles
 // use the low-res geometry.
 
-const TILE_SIZE  = 10000;
+const TILE_SIZE  = 9000;
 const GRID_DIM   = 3;
 const GRID_HALF  = 1;
 
