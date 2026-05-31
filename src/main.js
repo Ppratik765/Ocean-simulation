@@ -8,8 +8,11 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 
-import oceanVert from './shaders/ocean.vert.glsl?raw';
-import oceanFrag from './shaders/ocean.frag.glsl?raw';
+// ── FFT Ocean imports ────────────────────────────────────────────────────────
+import { GPUOcean } from './gpgpu/gpuOcean.js';
+import { createOceanMaterial, updateOceanMaterial } from './oceanMaterial.js';
+import { OceanReadback } from './oceanReadback.js';
+
 import sprayVert from './shaders/spray.vert.glsl?raw';
 import sprayFrag from './shaders/spray.frag.glsl?raw';
 
@@ -19,8 +22,6 @@ const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerH
 const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
               || (navigator.maxTouchPoints > 1 && window.innerWidth < 1024);
 
-// MATH REDUCTION: Turned off default antialias. Your msaaTarget handles this already. 
-// This frees up wasted GPU memory and stops the background double-tax.
 const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, isMobile ? 1.1 : 1.5));
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -29,112 +30,46 @@ renderer.shadowMap.enabled = !isMobile;
 renderer.shadowMap.type    = THREE.PCFShadowMap;
 document.getElementById('app').appendChild(renderer.domElement);
 
-// ─── OCEAN ───────────────────────────────────────────────────────────────────
+// ─── FFT OCEAN SETUP ─────────────────────────────────────────────────────────
 //
-// PERFORMANCE NOTE — why 9 tiles at 768 res instead of 9 tiles at 900:
+// Replaces the old 9-tile Gerstner LOD grid with a single high-density plane
+// driven by a multi-cascade GPGPU FFT compute pipeline.
 //
-// Ocean vertex count is the single largest GPU cost in the scene:
-//   900^2 × 9 tiles × 12 Gerstner iters = 87.5M shader evaluations/frame
-//   768^2 × 9 tiles × 12 Gerstner iters = 63.7M shader evaluations/frame
-// That 27% reduction in vertex work translates directly to frame time saved.
+// The plane follows the camera on the XZ plane every frame, creating the
+// illusion of an infinite ocean. The GPGPU textures tile seamlessly because
+// they are computed in the spectral domain.
 //
-// Visual quality: the camera flies at 22–220 units altitude. At 75 units the
-// horizon is ~1,700 units away. A 768-res tile has segments every 13 units —
-// finer than any wave feature visible at that distance. The reduction is
-// invisible at normal flight altitude.
-//
-// Gerstner iterations: 10 on desktop (was 12). Iterations 11-12 produce
-// wavelengths of ~6 units — shorter than one 13-unit mesh segment and therefore
-// geometrically unrepresentable. They cost shader time and produce zero visual
-// output. Dropping them is pure gain.
 
-let oceanVertSrc = isMobile
-    ? oceanVert.replace('i < 16', 'i < 8').replace('i < 4', 'i < 2')
-    : oceanVert.replace('i < 16', 'i < 10');
+// 1. Initialise the GPGPU pipeline
+const gpuOcean = new GPUOcean(renderer);
 
-// MATH REDUCTION: Measures distance to camera and breaks the loop early for horizon water
-// This kills up to 70% of the vertex math on your outer grid tiles with zero visual change.
-oceanVertSrc = oceanVertSrc.replace(
-    /for\s*\(\s*int\s+i\s*=\s*0;\s*i\s*<\s*10;\s*i\+\+\s*\)\s*\{/,
-    `float dCam = length((modelMatrix * vec4(position, 1.0)).xyz - cameraPosition);
-     for (int i = 0; i < 10; i++) {
-         if (dCam > 2000.0 && i > 2) break;`
-);
-const oceanFragSrc = isMobile
-    ? oceanFrag.replace('i < 4', 'i < 2')
-    : oceanFrag;
-let sprayVertSrc = sprayVert.replace('i < 16', 'i < 4');
+// 2. Sun direction (shared between ocean material and old lighting)
+const sunDirection = new THREE.Vector3(100, 50, -100).normalize();
 
-// THE OVERDRAW FIX: Instantly collapses particles behind the camera or miles away.
-sprayVertSrc = sprayVertSrc.replace(
-    /gl_PointSize\s*=\s*([^;]+);/,
-    `gl_PointSize = $1;
-     vec4 viewPos = modelViewMatrix * vec4(position, 1.0);
-     // viewPos.z is negative in front of the camera. If positive (behind us) or too far, skip drawing!
-     if (viewPos.z > 0.0 || -viewPos.z > 2500.0) gl_PointSize = 0.0;`
-);
-
-const customOceanMaterial = new THREE.ShaderMaterial({
-    vertexShader: oceanVertSrc, fragmentShader: oceanFragSrc,
-    uniforms: {
-        uTime:           { value: 0 },
-        uSunPosition:    { value: new THREE.Vector3(100, 50, -100).normalize() },
-        uWaterColor:     { value: new THREE.Color(0x1a2b3c) },
-        uWaterDeepColor: { value: new THREE.Color(0x050d14) },
-        uEnvMap:         { value: null }
-    }
+// 3. Create the ocean material (MeshPhysicalMaterial + onBeforeCompile)
+const oceanMaterial = createOceanMaterial({
+    displacementMap: gpuOcean.getDisplacementTexture(),
+    normalJacobianMap: gpuOcean.getNormalJacobianTexture(),
+    oceanSize: gpuOcean.primaryPatchSize,
+    sunDirection: sunDirection,
 });
 
-// ─── LOD OCEAN GRID ──────────────────────────────────────────────────────────
-//
-// KEY OPTIMISATION: Level-of-Detail tiling.
-//
-// Previous: 9 identical 768-res tiles = 9 × 590k verts = 5.3M verts processed
-// Now: 1 high-res centre tile (768) + 8 low-res outer tiles (256)
-//       = 590k + 8 × 65k = 590k + 524k = 1.11M verts processed
-//
-// This is a 79% reduction in ocean vertex count with zero visual impact.
-// The outer tiles are 5,000–15,000 units from the camera. At that distance,
-// even a 256-res mesh has segments every 39 units — still finer than the
-// visible wave detail at the horizon. The seam between resolutions is
-// invisible because the ShaderMaterial evaluates the same continuous wave
-// function at both sides; only the vertex density differs.
-//
-// The inner tile is the one directly under the bird/camera (snapped to the
-// nearest TILE_SIZE multiple of the bird position). The 8 surrounding tiles
-// use the low-res geometry.
+// 4. Single dense plane geometry
+const OCEAN_PLANE_SIZE = 10000;
+const OCEAN_SEGMENTS   = isMobile ? 256 : 512;
+const oceanGeo = new THREE.PlaneGeometry(
+    OCEAN_PLANE_SIZE, OCEAN_PLANE_SIZE,
+    OCEAN_SEGMENTS, OCEAN_SEGMENTS
+);
+oceanGeo.rotateX(-Math.PI / 2);
 
-const TILE_SIZE  = 9000;
-const GRID_DIM   = 3;
-const GRID_HALF  = 1;
+const oceanMesh = new THREE.Mesh(oceanGeo, oceanMaterial);
+oceanMesh.receiveShadow = !isMobile;
+oceanMesh.frustumCulled = false; // Always render — it fills the entire view
+scene.add(oceanMesh);
 
-const oceanResHigh = isMobile ? 384 : 768;   // centre tile
-const oceanResLow  = isMobile ?  128 : 256;   // 8 surrounding tiles — far from camera
-
-const geoHigh = new THREE.PlaneGeometry(TILE_SIZE, TILE_SIZE, oceanResHigh, oceanResHigh);
-geoHigh.rotateX(-Math.PI / 2);
-const geoLow  = new THREE.PlaneGeometry(TILE_SIZE, TILE_SIZE, oceanResLow,  oceanResLow);
-geoLow.rotateX(-Math.PI / 2);
-
-const oceans = [];
-for (let row = 0; row < GRID_DIM; row++) {
-    for (let col = 0; col < GRID_DIM; col++) {
-        const isCentre = (row === GRID_HALF && col === GRID_HALF);
-        const o = new THREE.Mesh(isCentre ? geoHigh : geoLow, customOceanMaterial);
-        o.position.set((col - GRID_HALF) * TILE_SIZE, 0, (row - GRID_HALF) * TILE_SIZE);
-        o.receiveShadow = !isMobile;
-
-        o.matrixAutoUpdate = false; 
-        o.updateMatrix();
-      
-        scene.add(o);
-        oceans.push({ mesh: o, isCentre });
-    }
-}
-
-// Track which mesh index is currently designated as the centre
-// so we can swap geometries when the centre tile shifts.
-let centreOceanIndex = 4; // starts as grid position (1,1) = index 4
+// 5. Height readback for physics sync
+const oceanReadback = new OceanReadback(renderer, gpuOcean.primaryPatchSize);
 
 // ─── SPRAY ───────────────────────────────────────────────────────────────────
 const particleCount = isMobile ? 15000 : 60000;
@@ -155,11 +90,14 @@ sprayGeo.setAttribute('position',  new THREE.BufferAttribute(posArr,  3));
 sprayGeo.setAttribute('aRandom',   new THREE.BufferAttribute(randArr, 1));
 sprayGeo.setAttribute('aVelocity', new THREE.BufferAttribute(velArr,  3));
 const sprayMaterial = new THREE.ShaderMaterial({
-    vertexShader: sprayVertSrc, fragmentShader: sprayFrag,
+    vertexShader: sprayVert, fragmentShader: sprayFrag,
     uniforms: {
-        uTime:           { value: 0 },
-        uWaterColor:     { value: new THREE.Color(0x1a2b3c) },
-        uWaterDeepColor: { value: new THREE.Color(0x050d14) }
+        uTime:              { value: 0 },
+        uWaterColor:        { value: new THREE.Color(0x1a2b3c) },
+        uWaterDeepColor:    { value: new THREE.Color(0x050d14) },
+        uDisplacementMap:   { value: null },
+        uNormalJacobianMap: { value: null },
+        uOceanSize:         { value: gpuOcean.primaryPatchSize },
     },
     transparent: true, depthWrite: false, blending: THREE.NormalBlending
 });
@@ -233,6 +171,7 @@ gltfLoader.load('/bird.glb', (gltf) => {
 });
 
 // ─── WORLD PROPS ─────────────────────────────────────────────────────────────
+// getBobOffset is now a fallback — props primarily use GPU readback heights
 function getBobOffset(phase, t) { return Math.sin(t * 0.4 + phase) * 1.5; }
 
 const PROP_DISTRIBUTION = [
@@ -346,32 +285,12 @@ const scatterCurrents = Array.from({ length: 4 }, () => new THREE.Vector3());
 let   isScattering    = false, scatterCooldown = 0;
 
 // ─── POST-PROCESSING ──────────────────────────────────────────────────────────
-//
-// PERFORMANCE NOTE — MSAA x2 vs x4:
-//
-// MSAA x4 runs the ocean fragment shader 4× per pixel on every ocean tile.
-// The ocean fragment shader is expensive: it evaluates fresnel, two noise
-// functions, FBM foam, and a fog blend. At 1080p with a 1.25 pixel ratio that
-// is 1920×1080×1.25²×4 = ~13M fragment evaluations per frame just for anti-
-// aliasing samples on the ocean alone — before any actual rendering work.
-//
-// MSAA x2 halves this to ~6.5M. The quality difference is not perceptible on
-// a smooth surface like water; the benefit of x4 over x2 is primarily on hard
-// geometry edges (ropes, railings). Those edges are already handled by the
-// renderer's native antialias: true setting for the canvas.
-//
-// Bloom at half resolution: UnrealBloomPass runs ~10 internal passes. Since
-// bloom is a large-radius blur by definition, rendering those passes at half
-// resolution produces a result that is pixel-for-pixel identical at the final
-// output resolution. This halves bloom GPU cost with zero visible difference.
-
 const msaaTarget = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {
     samples:    isMobile ? 2 : 4,
     type:       THREE.HalfFloatType,
     colorSpace: renderer.outputColorSpace
 });
 
-// Bloom at half resolution — see note above.
 const bloomRes = new THREE.Vector2(
     Math.floor(window.innerWidth  * 0.5),
     Math.floor(window.innerHeight * 0.5)
@@ -401,7 +320,7 @@ function applySkybox(tex) {
     tex.mapping       = THREE.EquirectangularReflectionMapping;
     scene.background  = tex;
     scene.environment = pmremGenerator.fromEquirectangular(tex).texture;
-    customOceanMaterial.uniforms.uEnvMap.value = tex;
+    // The MeshPhysicalMaterial automatically picks up scene.environment
 }
 
 function switchSkybox(dir) {
@@ -422,12 +341,10 @@ hdrLoader.load(`skybox_0.hdr`, applySkybox);
 // ─── LIGHTING ─────────────────────────────────────────────────────────────────
 scene.add(new THREE.HemisphereLight(0x8ab0d0, 0x0d1a24, 0.6));
 const sunLight = new THREE.DirectionalLight(0xfff5e0, 1.8);
-sunLight.position.copy(customOceanMaterial.uniforms.uSunPosition.value).multiplyScalar(100);
+sunLight.position.copy(sunDirection).multiplyScalar(100);
 sunLight.castShadow           = !isMobile;
 sunLight.shadow.mapSize.width = sunLight.shadow.mapSize.height = 1024;
 sunLight.shadow.camera.near   = 1;    sunLight.shadow.camera.far    = 1000;
-// MATH REDUCTION: Shrunk the shadow compute area from 1200x1200 to 400x400.
-// This calculates shadows much faster and actually makes the bird's shadow look sharper!
 sunLight.shadow.camera.left   = -200; sunLight.shadow.camera.right  =  200;
 sunLight.shadow.camera.top    =  200; sunLight.shadow.camera.bottom = -200;
 sunLight.shadow.bias = -0.0005; sunLight.shadow.normalBias = 0.02;
@@ -611,12 +528,10 @@ function lockRootBones(model) {
 const TARGET_FRAME_MS = 1000 / 60;
 let lastTime      = 0;
 let lastFrameTime = 0;
-
-// Throttle sparkle CPU updates — they run every other frame instead of every
-// frame. The animation runs at 30 updates/sec which is imperceptible for a
-// slow rising particle effect. Saves a full JS loop over 4 × 40 = 160 sparkle
-// position writes per frame.
 let _sparkleFrame = 0;
+
+// Prop readback stagger counter — different props read at different frames
+let _propReadbackCounter = 0;
 
 function animate(currentTime) {
     requestAnimationFrame(animate);
@@ -629,39 +544,28 @@ function animate(currentTime) {
 
     allMixers.forEach((m, i) => { m.update(delta); lockRootBones(allWrappers[i]?.children[0] ?? null); });
 
-    // ── LOD OCEAN GRID SNAP ───────────────────────────────────────────────────
-    // Snap the entire 3×3 grid to the nearest tile boundary of the bird's
-    // XZ position. Determine which of the 9 tiles is now the centre tile and
-    // assign the high-res geometry to it, low-res to all others.
-    const snapX = Math.round(birdGroup.position.x / TILE_SIZE) * TILE_SIZE;
-    const snapZ = Math.round(birdGroup.position.z / TILE_SIZE) * TILE_SIZE;
-    let tileIdx = 0;
-    let newCentreIdx = -1;
-    for (let row = 0; row < GRID_DIM; row++) {
-        for (let col = 0; col < GRID_DIM; col++) {
-            const { mesh } = oceans[tileIdx];
-            const newX = snapX + (col - GRID_HALF)*TILE_SIZE;
-            const newZ = snapZ + (row - GRID_HALF)*TILE_SIZE;
-            if (mesh.position.x !== newX || mesh.position.z !== newZ) {
-                mesh.position.set(newX, 0, newZ);
-                mesh.updateMatrix();
-            }
-            
-            if (row === GRID_HALF && col === GRID_HALF) newCentreIdx = tileIdx;
-            tileIdx++;
-        }
-    }
-    // Swap geometry if the centre tile identity has changed (it doesn't change
-    // in this fixed-grid layout, but the swap logic is here for correctness)
-    if (newCentreIdx !== centreOceanIndex) {
-        oceans[centreOceanIndex].mesh.geometry = geoLow;
-        oceans[newCentreIdx].mesh.geometry     = geoHigh;
-        centreOceanIndex = newCentreIdx;
-    }
+    // ── FFT OCEAN UPDATE ─────────────────────────────────────────────────────
+    // 1. Run the GPGPU compute pipeline
+    gpuOcean.update(t);
 
-    customOceanMaterial.uniforms.uTime.value = t * 1.25;
-    sprayMaterial.uniforms.uTime.value       = t * 1.25;
+    // 2. Update ocean material textures
+    updateOceanMaterial(oceanMaterial, {
+        time: t,
+        displacementMap: gpuOcean.getDisplacementTexture(),
+        normalJacobianMap: gpuOcean.getNormalJacobianTexture(),
+    });
 
+    // 3. Update spray uniforms
+    sprayMaterial.uniforms.uTime.value = t;
+    sprayMaterial.uniforms.uDisplacementMap.value = gpuOcean.getDisplacementTexture();
+    sprayMaterial.uniforms.uNormalJacobianMap.value = gpuOcean.getNormalJacobianTexture();
+
+    // 4. Snap ocean plane to camera XZ position (infinite ocean illusion)
+    oceanMesh.position.x = birdGroup.position.x;
+    oceanMesh.position.z = birdGroup.position.z;
+    oceanMesh.position.y = 0;
+
+    // ── EXPOSURE / BLOOM TRANSITIONS ─────────────────────────────────────────
     currentExposure += (targetExposure - currentExposure) * Math.min(delta * 8, 1);
     renderer.toneMappingExposure = currentExposure;
     currentBloom += (targetBloom - currentBloom) * Math.min(delta * 8, 1);
@@ -704,15 +608,25 @@ function animate(currentTime) {
         let targetPitch = 0;
         if (moveState.forward)  targetPitch =  Math.PI/12;
         if (moveState.backward) targetPitch = -Math.PI/12;
-        if (birdGroup.position.y <= 22.0)  { birdGroup.position.y = 22.0;  if (targetPitch < 0) targetPitch = 0; }
+
+        // ── GPU-driven altitude limit ────────────────────────────────────────
+        // Read the actual wave height beneath the bird from the GPGPU texture
+        const displacementTex = gpuOcean.getDisplacementTexture();
+        const birdWaveHeight = displacementTex
+            ? oceanReadback.sample(displacementTex, birdGroup.position.x, birdGroup.position.z, 3)
+            : 0;
+        const minAltitude = Math.max(22.0, birdWaveHeight + 15.0);
+
+        if (birdGroup.position.y <= minAltitude)  { birdGroup.position.y = minAltitude;  if (targetPitch < 0) targetPitch = 0; }
         if (birdGroup.position.y >= 220.0) { birdGroup.position.y = 220.0; if (targetPitch > 0) targetPitch = 0; }
         tiltGroup.rotation.x += (targetPitch - tiltGroup.rotation.x) * delta * 4.0;
 
         let nearestPropDistSq = Infinity, avoidPropPos = null, avoidDistSq = Infinity;
         const AVOID_R = 55, AVOID_RSQ = AVOID_R * AVOID_R;
         _sparkleFrame++;
+        _propReadbackCounter++;
 
-        propPool.forEach(prop => {
+        propPool.forEach((prop, propIdx) => {
             const m = prop.mesh;
             const dx = m.position.x - birdGroup.position.x;
             const dz = m.position.z - birdGroup.position.z;
@@ -723,13 +637,21 @@ function animate(currentTime) {
                 m.position.set(pos.x, prop.yBase, pos.z);
                 m.rotation.set(0, Math.random() * Math.PI * 2, 0);
             }
-            m.position.y = prop.yBase + getBobOffset(prop.bobPhase, t);
+
+            // ── GPU-driven prop bobbing ──────────────────────────────────────
+            // Stagger readback: each prop reads every 6th frame on a different offset
+            if (displacementTex && ((_propReadbackCounter + propIdx) % 6 === 0)) {
+                const propWaveHeight = oceanReadback.sample(displacementTex, m.position.x, m.position.z, 1);
+                prop._lastWaveHeight = propWaveHeight;
+            }
+            const waveH = prop._lastWaveHeight ?? 0;
+            m.position.y = prop.yBase + waveH + getBobOffset(prop.bobPhase, t) * 0.3;
 
             // Sparkle update throttled to every other frame
             if (prop.sparklePoints && (_sparkleFrame & 1) === 0) {
                 const pos = prop.sparklePoints.geometry.attributes.position;
                 for (let si = 0; si < SPARKLE_COUNT; si++) {
-                    pos.setY(si, (pos.getY(si) + delta * 2.4) % 5.0);  // 2× speed to compensate half-rate
+                    pos.setY(si, (pos.getY(si) + delta * 2.4) % 5.0);
                     pos.setX(si, pos.getX(si) + Math.sin(t*1.5 + sparklePhases[si]) * 0.005);
                 }
                 pos.needsUpdate = true;
@@ -773,9 +695,9 @@ function animate(currentTime) {
         });
 
         sunLight.position.set(
-            birdGroup.position.x + customOceanMaterial.uniforms.uSunPosition.value.x * 100,
-            customOceanMaterial.uniforms.uSunPosition.value.y * 100,
-            birdGroup.position.z + customOceanMaterial.uniforms.uSunPosition.value.z * 100
+            birdGroup.position.x + sunDirection.x * 100,
+            sunDirection.y * 100,
+            birdGroup.position.z + sunDirection.z * 100
         );
         sunLight.target.position.copy(birdGroup.position);
         sunLight.target.updateMatrixWorld();
